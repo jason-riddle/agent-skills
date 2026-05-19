@@ -60,13 +60,18 @@ SOPS_AGE_KEY_FILE=key.txt sops --decrypt secrets.yaml
 SOPS_AGE_KEY="AGE-SECRET-KEY-..." sops --decrypt secrets.yaml
 ```
 
-### SSH keys as age recipients (sops v3.9.1+)
+### SSH keys as age recipients (sops v3.9.1+, reliable v3.13.1+)
 
 sops supports using SSH public keys (`ssh-ed25519`, `ssh-rsa`) directly as age
 recipients — no need to generate a separate age key if you already have SSH keys.
 
 **Only `ssh-ed25519` and `ssh-rsa` are supported. `ecdsa-sha2-nistp256` and
 other key types are not supported and will produce an error.**
+
+**Version warning**: Although SSH recipient support was introduced in v3.9.1,
+versions prior to v3.13.1 may reject SSH keys with `malformed recipient: mixed
+case` even for valid `ssh-ed25519` keys. Install v3.13.1+ for reliable SSH key
+support.
 
 #### Encrypting with an SSH public key
 
@@ -616,9 +621,55 @@ sops --encrypt --age age1ql3z7... secrets.yaml
 
 ### sops version check
 
-SSH recipient support (`ssh-ed25519`, `ssh-rsa`) was added in **sops v3.9.1**.
-On older versions, any `ssh-` prefixed recipient silently fails or errors.
+SSH recipient support (`ssh-ed25519`, `ssh-rsa`) was introduced in **sops
+v3.9.1** but is unreliable before **v3.13.1**. Versions in the v3.9.x–v3.12.x
+range may reject valid `ssh-ed25519` keys with `malformed recipient: mixed
+case`. Always install v3.13.1+ when using SSH keys as recipients.
 Always confirm: `sops --version`.
+
+### `.sops.yaml` creation rules match against the filename sops operates on
+
+`path_regex` is matched against the path of the file sops is reading/writing,
+not against a separate `--output` target. If you pass `--output /tmp/out.yaml`
+with an input file named `secrets.yaml`, sops matches the rule against
+`secrets.yaml`, not `/tmp/out.yaml`.
+
+Consequence: when generating an encrypted file via `--output`, the *input*
+filename must match the creation rule, OR write the plaintext to the final
+destination filename first and then `--encrypt --in-place`:
+
+```bash
+# WRONG: rule for \.env\.enc\.yaml$ won't match /tmp/plain.yaml
+sops --encrypt --output .env.enc.yaml /tmp/plain.yaml  # rule miss -> error
+
+# CORRECT: write plaintext to the final name, then encrypt in-place
+cp /tmp/plain.yaml .env.enc.yaml
+sops --encrypt --in-place .env.enc.yaml  # rule matches .env.enc.yaml
+```
+
+### dotenv input/output format has a metadata parse bug
+
+`sops --encrypt --input-type dotenv --output-type dotenv` appears to succeed
+but the resulting file cannot be decrypted — sops fails with:
+
+```
+parsing time "" as "2006-01-02T15:04:05Z07:00": cannot parse "" as "2006"
+```
+
+**Workaround**: convert `.env` key=value pairs to a flat YAML file first, then
+encrypt as YAML. Flat YAML (`KEY: value`) works reliably and can be sourced
+back as environment variables via `sops exec-env` or manual export.
+
+```bash
+# Convert .env to flat YAML, then encrypt
+grep -E '^[A-Z_]+=' .env | python3 -c "
+import sys
+for line in sys.stdin:
+    k, v = line.strip().split('=', 1)
+    print(f'{k}: {repr(v)}')
+" > secrets.enc.yaml
+sops --encrypt --in-place secrets.enc.yaml
+```
 
 ## Reference
 
