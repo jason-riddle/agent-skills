@@ -5,7 +5,9 @@ description: >
   `ollama` — locally or on a remote machine. Triggers on requests like "run a
   model with ollama", "pull an ollama model", "list ollama models", "start
   ollama server", "call ollama on a remote machine", "connect to a remote
-  ollama instance", or any LLM task using Ollama whether local or remote.
+  ollama instance", "what models are available on ollama", "find a model on
+  ollama.com", "inspect a model", or any LLM task using Ollama whether local
+  or remote.
 ---
 
 # ollama
@@ -53,6 +55,95 @@ curl http://<remote-host>:11434/api/chat \
 
 Replace `<remote-host>` with the remote machine's Tailscale IP or hostname.
 Port 11434 is the Ollama default.
+
+## Discovering models on ollama.com
+
+Browse and search at https://ollama.com/search — models are filterable by
+category (e.g. vision, tools, embedding, code).
+
+Each model has a library page at `https://ollama.com/library/<model>` listing
+all available tags (sizes and quantizations).
+
+Common tag suffixes:
+
+| Tag | Meaning |
+|---|---|
+| `:latest` | Default tag — usually the recommended size |
+| `:1b`, `:3b`, `:7b` | Parameter count (smaller = faster, less capable) |
+| `q4_0`, `q4_k_m`, `q8_0` | Quantization level (higher = more accurate, larger) |
+| `fp16` | Full precision — largest and most accurate |
+
+If no tag is specified, `ollama pull <model>` fetches `:latest`.
+
+### Inspect a model on ollama.com without pulling it
+
+Use `https://ollama.com/api/show` to fetch model metadata directly from the
+ollama.com library — no local Ollama install required:
+
+```bash
+# Show metadata for a model (architecture, context length, capabilities, etc.)
+curl -s -X POST https://ollama.com/api/show \
+  -d '{"name":"llama3.2:latest"}' | jq .
+
+# Example output fields: details.family, details.parameter_size,
+# model_info.*.context_length, capabilities (completion, vision, tools, etc.)
+```
+
+The `name` field must match a tag listed on the model's library page
+(`https://ollama.com/library/<model>`). Use `:latest` if unsure of the tag.
+
+### Query ollama.com featured models with jq
+
+```bash
+# List all featured model names
+curl -s https://ollama.com/api/tags | jq '[.models[].name]'
+
+# Show name and size (in GB), sorted smallest first
+curl -s https://ollama.com/api/tags | jq '[.models[] | {name, size_gb: (.size/1e9 | . * 10 | round / 10)}] | sort_by(.size_gb)'
+
+# Filter to models under a size threshold (e.g. under 10 GB)
+curl -s https://ollama.com/api/tags | jq '[.models[] | select(.size < 10000000000) | {name, size_gb: (.size/1e9 | . * 10 | round / 10)}]'
+```
+
+Note: `https://ollama.com/api/tags` returns a curated/featured subset (~40
+models), not the full library. Browse the full catalog at
+`https://ollama.com/search`.
+
+### Pull and inspect a model
+
+```bash
+# Pull a specific model and tag
+ollama pull <model>:<tag>
+
+# Show model info (architecture, context length, quantization, capabilities)
+ollama show <model>:<tag>
+
+# Show individual details
+ollama show <model>:<tag> --modelfile     # Modelfile used to create it
+ollama show <model>:<tag> --parameters   # Runtime parameters (temperature, stop tokens, etc.)
+ollama show <model>:<tag> --template     # Prompt template
+ollama show <model>:<tag> --system       # System prompt (if any)
+ollama show <model>:<tag> --license      # License
+ollama show <model>:<tag> --verbose      # Full detail dump
+
+# List all locally pulled models
+ollama list
+
+# List currently running models
+ollama ps
+```
+
+### Point the CLI at a remote instance
+
+Set `OLLAMA_HOST` to run any `ollama` CLI command against a remote instance
+instead of localhost:
+
+```bash
+OLLAMA_HOST=http://<remote-host>:11434 ollama list
+OLLAMA_HOST=http://<remote-host>:11434 ollama show <model>
+OLLAMA_HOST=http://<remote-host>:11434 ollama pull <model>
+OLLAMA_HOST=http://<remote-host>:11434 ollama run <model>
+```
 
 ## Gotchas
 
