@@ -148,16 +148,17 @@ age -d -i key.txt backup.tar.gz.age | tar -xzf -
    ```yaml
    creation_rules:
      - path_regex: secrets/.*\.yaml$
-       age: age1ql3z7...
+       age: "age1ql3z7..."
    ```
 
-4. **Multiple recipients** (team members): comma-separate public keys in `.sops.yaml`:
+4. **Multiple recipients** (team members): comma-separate public keys on a
+   single quoted line. **Do NOT use YAML folded scalar (`>-`)** — sops
+   concatenates multi-line keys into one invalid space-joined string and
+   decryption fails:
    ```yaml
    creation_rules:
      - path_regex: .*\.yaml$
-       age: >-
-         age1alice...,
-         age1bob...
+       age: "age1alice...,age1bob..."
    ```
 
 See the `sops` skill for full sops + age workflows, key rotation, and troubleshooting.

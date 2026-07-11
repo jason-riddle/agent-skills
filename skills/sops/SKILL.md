@@ -116,12 +116,18 @@ SOPS_AGE_SSH_PRIVATE_KEY_FILE=/path/to/custom_key sops --decrypt secrets.yaml
 
 ```yaml
 creation_rules:
+  # Single SSH key
   - path_regex: secrets/.*\.yaml$
     age: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host"
-  # Mix SSH and age keys as multiple recipients (comma-separated)
+  # Multiple SSH keys (comma-separated, single line — see gotcha below)
   - path_regex: shared/.*\.yaml$
-    age: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...,age1xxx..."
+    age: "ssh-ed25519 AAAA...,ssh-ed25519 BBBB..."
+  # Mix SSH and age keys
+  - path_regex: mixed/.*\.yaml$
+    age: "ssh-ed25519 AAAA...,age1xxx..."
 ```
+
+The comment (`user@host`) in SSH keys is optional — key type + key data is sufficient.
 
 #### Passphrase-protected SSH keys
 
@@ -164,9 +170,9 @@ don't have to pass flags every time:
 ```yaml
 creation_rules:
   - path_regex: secrets/.*\.yaml$
-    age: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    age: "age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
   - path_regex: .*\.env$
-    age: age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+    age: "age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     # Optional: restrict which keys get encrypted (default: encrypt all)
     encrypted_regex: "^(password|token|secret|key|credential)$"
 ```
@@ -258,31 +264,44 @@ sops --decrypt secrets.yaml
 
 ### Key lookup order
 
-sops searches for age private keys in this order and uses the first match:
+sops searches for private keys (both SSH and age) in this order and uses the
+first match:
 
-1. `SOPS_AGE_SSH_PRIVATE_KEY_FILE` (explicit path to SSH private key)
-2. `SOPS_AGE_SSH_PRIVATE_KEY_CMD` (command whose stdout is the SSH private key)
-3. `~/.ssh/id_ed25519` (SSH auto-discovery)
-4. `SOPS_AGE_KEY` (raw age key material, inline)
-5. `SOPS_AGE_KEY_FILE` (path to age identity file)
-6. `SOPS_AGE_KEY_CMD` (command whose stdout is the age key)
-7. `~/.config/sops/age/keys.txt` (default location — no env var needed)
-8. `~/.ssh/id_rsa` (SSH auto-discovery fallback)
+1. `SOPS_AGE_SSH_PRIVATE_KEY_FILE` — explicit path to SSH private key
+2. `SOPS_AGE_SSH_PRIVATE_KEY_CMD` — command whose stdout is the SSH private key
+3. `SOPS_AGE_KEY` — raw age key material, inline
+4. `SOPS_AGE_KEY_FILE` — path to age identity file
+5. `SOPS_AGE_KEY_CMD` — command whose stdout is the age key
+6. `~/.config/sops/age/keys.txt` — default age key location (no env var needed)
+7. `~/.ssh/id_ed25519` — SSH auto-discovery (ed25519)
+8. `~/.ssh/id_rsa` — SSH auto-discovery fallback (RSA)
+
+Note: the SOPS error message only lists the env-var locations (items 1–5).
+Auto-discovery paths (items 6–8) are tried silently after the env-var checks.
+If decryption fails with "no identity matched any of the recipients," verify
+your key is at one of the auto-discovery paths or set an env var explicitly.
 
 ### Multiple recipients (team / multi-environment)
 
-```bash
-# In .sops.yaml — comma-separate public keys
+**Always use comma-separated keys on a single line.** Do NOT use YAML folded
+scalar (`>-`) with multiple keys on separate lines — SOPS concatenates them
+into one invalid recipient string (space-joined) and decryption fails silently.
+
+```yaml
+# CORRECT — comma-separated on one line (works for both age and SSH keys)
 creation_rules:
   - path_regex: .*\.yaml$
-    age: >-
-      age1alice...,
-      age1bob...,
-      age1ci...
+    age: "age1alice...,age1bob...,age1ci..."
+  # SSH keys also comma-separated
+  - path_regex: .*\.env$
+    age: "ssh-ed25519 AAAA...,ssh-ed25519 BBBB..."
+  # Mix age and SSH keys
+  - path_regex: .*\.env$
+    age: "age1xxx...,ssh-ed25519 AAAA..."
 ```
 
 ```bash
-# On the command line
+# On the command line (also comma-separated)
 sops --encrypt --age "age1alice...,age1bob..." -o secrets.enc.yaml secrets.yaml
 ```
 
@@ -301,7 +320,7 @@ Encrypt only the sensitive keys; leave non-sensitive values readable in diffs:
 creation_rules:
   - path_regex: .*\.yaml$
     encrypted_regex: "^(password|api_key|token|secret|credential)$"
-    age: age1ql3z7...
+    age: "age1ql3z7..."
 ```
 
 For `.env` files, encrypt all non-comment lines:
@@ -310,8 +329,63 @@ For `.env` files, encrypt all non-comment lines:
 creation_rules:
   - path_regex: \.env.*
     encrypted_regex: "^(?!#).*"
-    age: age1ql3z7...
+    age: "age1ql3z7..."
 ```
+
+### Two approaches: SSH keys vs age keys
+
+**Approach 1: SSH keys (no new keys to generate)**
+
+If you already have an `ssh-ed25519` key pair at `~/.ssh/id_ed25519`, use it
+directly — no need to install or generate a separate age key:
+
+```yaml
+# .sops.yaml
+creation_rules:
+  - path_regex: .*\.yaml$
+    age: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5... user@host"
+```
+
+```bash
+# Encrypt and decrypt — sops auto-discovers ~/.ssh/id_ed25519
+sops --encrypt --in-place secrets.yaml
+sops --decrypt secrets.yaml
+```
+
+Works with `ssh-rsa` keys too, but `ssh-ed25519` is preferred. Only
+`ssh-ed25519` and `ssh-rsa` are supported — `ecdsa` and other types produce
+errors.
+
+**Approach 2: Dedicated age key (no SSH key required)**
+
+Generate a standalone age key pair — useful if you don't want to tie sops to
+your SSH keys, or for CI/automation:
+
+```bash
+# Generate a key pair
+age-keygen -o ~/.config/sops/age/keys.txt
+# Public key is printed to stderr — copy it for .sops.yaml
+
+# Or retrieve the public key later:
+age-keygen -y ~/.config/sops/age/keys.txt
+```
+
+```yaml
+# .sops.yaml
+creation_rules:
+  - path_regex: .*\.yaml$
+    age: "age1ql3z7..."
+```
+
+```bash
+# Encrypt and decrypt — sops auto-discovers ~/.config/sops/age/keys.txt
+sops --encrypt --in-place secrets.yaml
+sops --decrypt secrets.yaml
+```
+
+Both approaches support auto-discovery, explicit env vars, and mixing keys
+for multiple recipients. Choose based on whether you want to reuse SSH keys
+or keep sops keys separate.
 
 ### Key rotation
 
@@ -439,10 +513,7 @@ every listed fingerprint; any holder of a matching secret key can decrypt.
 ```yaml
 creation_rules:
   - path_regex: secrets/.*\.yaml$
-    pgp: >-
-      AABBCCDDEEFF00112233445566778899AABBCCDD,
-      1122334455667788990011AABBCCDDEEFF001122,
-      FFEEDDCCBBAA99887766554433221100FFEEDDCC
+    pgp: "AABBCCDDEEFF00112233445566778899AABBCCDD,1122334455667788990011AABBCCDDEEFF001122,FFEEDDCCBBAA99887766554433221100FFEEDDCC"
 ```
 
 ```bash
@@ -517,6 +588,7 @@ with `gpg-preset-passphrase` before invoking sops.
 
 ## Gotchas
 
+- **NEVER use YAML folded scalar (`>-`) for multiple keys in `.sops.yaml`.** SOPS concatenates multi-line keys into a single space-joined string, producing one invalid recipient. Decryption fails with "no identity matched any of the recipients." Always use comma-separated keys on a single quoted line: `age: "key1,key2,key3"`. This affects both SSH keys (`ssh-ed25519 AAAA...,ssh-ed25519 BBBB...`) and age keys (`age1xxx...,age1yyy...`).
 - `sops --decrypt` prints to stdout; use `--output file.yaml` or `--in-place` to write to disk. Writing decrypted secrets to disk is usually undesirable — prefer stdout piped directly to the consuming process.
 - `sops secrets.yaml` (no flags) opens the file for interactive editing. In a non-interactive agent context, always use `--decrypt`, `--encrypt`, or `--extract` explicitly.
 - The `sops` metadata block at the bottom of every file (`sops:` key in YAML) is always stored in plaintext. Sensitive key metadata (key ARNs, age recipients, full SSH public keys) is visible to anyone with file access.
@@ -547,21 +619,20 @@ age-keygen -y "$SOPS_AGE_KEY_FILE"
 
 ### Key not found / verbose "did not find keys" error
 
-sops prints all locations it searched. The full lookup order is:
-`SOPS_AGE_SSH_PRIVATE_KEY_FILE`, `SOPS_AGE_SSH_PRIVATE_KEY_CMD`,
-`SOPS_AGE_KEY`, `SOPS_AGE_KEY_CMD`, `SOPS_AGE_KEY_FILE`,
-`~/.config/sops/age/keys.txt`, `~/.ssh/id_ed25519`, `~/.ssh/id_rsa`.
+sops prints all env-var locations it searched. The full lookup order (including
+silent auto-discovery) is documented in the
+[Key lookup order](#key-lookup-order) section above.
 
-Workaround: set `SOPS_AGE_KEY_FILE` explicitly to the correct path:
+Workaround: set `SOPS_AGE_KEY_FILE` (for age keys) or
+`SOPS_AGE_SSH_PRIVATE_KEY_FILE` (for SSH keys) explicitly:
 
 ```bash
+# For age keys
 SOPS_AGE_KEY_FILE=/path/to/key.txt sops --decrypt secrets.yaml
-```
 
-The full lookup order (from the error message) is:
-`SOPS_AGE_SSH_PRIVATE_KEY_FILE`, `SOPS_AGE_SSH_PRIVATE_KEY_CMD`,
-`~/.ssh/id_ed25519`, `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`,
-`SOPS_AGE_KEY_CMD`, `~/.config/sops/age/keys.txt`, `~/.ssh/id_rsa`.
+# For SSH keys
+SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_ed25519 sops --decrypt secrets.yaml
+```
 
 ### `SOPS_SSH_PRIVATE_KEY_FILE` is silently ignored
 
