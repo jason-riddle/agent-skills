@@ -42,40 +42,73 @@ blessed path. Run all queries through `postgres_query`.
 
 ## Schema overview
 
-72 tables; the handful that matter for document lookups:
+72 tables; the handful that matter for document lookups. Row counts below
+are **actual `COUNT(*)`** (verified), not `pg_stat_user_tables.n_live_tup`
+(see Gotchas — that view is stale and wildly undercounts several tables).
 
-| Table | Purpose | ~Rows |
-|-------|---------|-------|
-| `documents_document` | Core document metadata (title, checksum, dates, FKs) | ~2.5k |
-| `documents_tag` | Tag definitions (hierarchical via `tn_parent_id`, `tn_*`) | ~590 |
-| `documents_document_tags` | M2M join: document_id ↔ tag_id | ~76 |
-| `documents_correspondent` | Sender/source (e.g. "CloverLeaf PM", "IRS (Muni)") | ~250 |
-| `documents_documenttype` | Type classification (Statement, Receipt, Tax Form, …) | ~32 |
-| `documents_customfield` | Custom field definitions (monetary, string, date, …) | ~13 |
-| `documents_customfieldinstance` | Per-document custom field values | ~56 |
-| `documents_note` | Notes attached to documents | ~0 |
+| Table | Purpose | Actual rows |
+|-------|---------|-------------|
+| `documents_document` | Core document metadata (title, checksum, dates, FKs) | 2,559 (2,531 active, 28 soft-deleted) |
+| `documents_tag` | Tag definitions (hierarchical via `tn_parent_id`, `tn_*`) | 587 |
+| `documents_document_tags` | M2M join: document_id ↔ tag_id | 11,753 |
+| `documents_correspondent` | Sender/source (e.g. "CloverLeaf PM", "IRS (Muni)") | 250 |
+| `documents_documenttype` | Type classification (Statement, Receipt, Tax Form, …) | 32 |
+| `documents_customfield` | Custom field definitions (monetary, string, date, …) | 13 |
+| `documents_customfieldinstance` | Per-document custom field values | 1,366 |
+| `documents_note` | Notes attached to documents | 0 |
 | `documents_storagepath` | Custom storage path configs | 0 |
-| `documents_paperlesstask` | Celery ingest/OCR task log (success/failure) | ~7.7k |
-| `auditlog_logentry` | Django audit log (edits, tag changes, …) | ~240 |
+| `documents_paperlesstask` | Celery ingest/OCR task log (success/failure) | 7,749 |
+| `documents_workflowrun` | Workflow execution log (type 2 = trigger, 3 = action) | 8,597 |
+| `paperless_mail_processedmail` | Inbound mail rule processing log | 275 |
+| `auditlog_logentry` | Django audit log (edits, tag changes, …) | 43,188 |
 
 Key `documents_document` columns: `id`, `title`, `content` (extracted text,
 searchable), `checksum` (MD5), `archive_checksum`, `created` (date), `added`
 (timestamp), `modified`, `correspondent_id`, `document_type_id`,
 `storage_path_id`, `owner_id`, `mime_type`, `page_count`,
 `original_filename`, `archive_filename`, `archive_serial_number`,
-`deleted_at` (soft-delete), `restored_at`, `transaction_id`.
+`deleted_at` (soft-delete), `restored_at`, `transaction_id` (currently
+unused — 0 docs populate it), `storage_type` (all `"unencrypted"`),
+`filename`.
+
+`documents_paperlesstask` columns: `id`, `task_id` (Celery UUID),
+`acknowledged`, `date_created`, `date_started`, `date_done`, `result` (text,
+error message on failure), `status` (`SUCCESS`/`FAILURE`/`STARTED`),
+`task_name`, `task_file_name` (original upload filename — useful for
+matching a failed ingest to a file), `type` (`auto_task`/`scheduled_task`/
+`manual_task`), `owner_id`.
+
+`auditlog_logentry` columns: `id`, `object_pk`/`object_id` (the affected
+doc's id), `object_repr`, `action` (smallint: 0=create, 1=update, 2=delete),
+`changes` (jsonb), `changes_text`, `timestamp`, `actor_id`, `actor_email`,
+`content_type_id`, `remote_addr`, `additional_data`, `serialized_data`,
+`cid`. Join `object_id` to `documents_document.id` to find a doc's edit
+history.
+
+`documents_workflowrun` columns: `id`, `type` (2=trigger, 3=action),
+`run_at`, `document_id`, `workflow_id`, plus soft-delete fields.
+
+`paperless_mail_processedmail` columns: `id`, `folder`, `uid`, `subject`,
+`received`, `processed`, `status` (`SUCCESS`/`FAILED`/
+`PROCESSED_WO_CONSUMPTION`), `error`, `owner_id`, `rule_id`.
 
 Tags are flat in practice (`tn_level = 1`, `tn_parent_id` is NULL for all
 top-level tags). Do not assume a deep tree; query `tn_parent_id IS NULL`
-for the root set. `documents_tag.is_inbox_tag` marks the special "Inbox" tag
-(id 2) and the legacy "Renamed (Workflow)" tag (id 14).
+for the root set. `documents_tag.is_inbox_tag` marks the special "Inbox"
+tag (id 2) and the legacy "Renamed (Workflow)" tag (id 14). Note: the
+"Inbox" tag currently has **0 documents** attached — the inbox is clear.
 
-Custom field values are sparse and polymorphic —
-`documents_customfieldinstance` has one value column per data type
-(`value_text`, `value_bool`, `value_monetary`, `value_date`, …). Coalesce
-them when reading. Custom fields in use: `Cash Paid (USD)`,
-`Tax Package Type`, `Reference ID`, `Previous Filename`, `For Tax Period
-Ending Date`, `Created Date`, `Status`, `Work Order ID`, and a few others.
+All 13 custom fields (with data type and populated instance count):
+`Previous Filename` (string, 487), `For Tax Period Ending Date` (date,
+328), `Reference ID` (string, 271), `Cash Paid (USD)` (monetary, 192),
+`Created Date` (date, 53), `Work Order ID` (string, 11), `Tax Form`
+(string, 10), `Tax Filing Status` (string, 5), `Tax Package Purpose`
+(string, 4), `Tax Package Type` (string, 4), `Cash Paid (EUR)` (monetary,
+1), `Status` (string, 0), `Duplicate(s) Document ID` (integer, 0). Only
+`monetary`, `string`, `date`, and `integer` data types are used —
+`value_bool`/`value_float`/`value_url`/`value_select`/`value_document_ids`/
+`value_long_text` are never populated but are kept in the Q11 `COALESCE`
+defensively.
 
 ## Workflow
 
@@ -98,12 +131,33 @@ Ending Date`, `Created Date`, `Status`, `Work Order ID`, and a few others.
 
 Purpose: orient before any ad-hoc query; confirm a table exists.
 
+**Warning:** `n_live_tup` is stale and unreliable in this database (e.g. it
+reports `documents_correspondent` = 0 when the real count is 250, and
+`documents_document_tags` = 76 when the real count is 11,753). Use this only
+to confirm a table *exists*; for accurate counts run `SELECT COUNT(*) FROM
+<table>` or the batch query below.
+
 ```sql
 SELECT
   relname AS table_name,
-  n_live_tup AS row_count
+  n_live_tup AS approx_row_count
 FROM pg_stat_user_tables
 ORDER BY n_live_tup DESC;
+```
+
+Accurate batch count for the key tables (preferred over Q1's numbers):
+
+```sql
+SELECT 'documents_document' AS t, COUNT(*) AS actual FROM documents_document
+UNION ALL SELECT 'documents_document_tags', COUNT(*) FROM documents_document_tags
+UNION ALL SELECT 'documents_tag', COUNT(*) FROM documents_tag
+UNION ALL SELECT 'documents_correspondent', COUNT(*) FROM documents_correspondent
+UNION ALL SELECT 'documents_documenttype', COUNT(*) FROM documents_documenttype
+UNION ALL SELECT 'documents_customfield', COUNT(*) FROM documents_customfield
+UNION ALL SELECT 'documents_customfieldinstance', COUNT(*) FROM documents_customfieldinstance WHERE deleted_at IS NULL
+UNION ALL SELECT 'documents_paperlesstask', COUNT(*) FROM documents_paperlesstask
+UNION ALL SELECT 'documents_workflowrun', COUNT(*) FROM documents_workflowrun
+UNION ALL SELECT 'auditlog_logentry', COUNT(*) FROM auditlog_logentry;
 ```
 
 ### Q2 — Column schema for `documents_document`
@@ -313,13 +367,19 @@ WHERE cfi.field_id = (
 
 Purpose: diagnose why a document didn't appear — duplicates, storage
 errors, OCR failures. `documents_paperlesstask` is the Celery task log.
-`result` holds the error message.
+`result` holds the error message; `task_file_name` is the original upload
+filename. The vast majority of `FAILURE` rows (~1,021 of them, all
+`auto_task`) are **duplicate rejections** — the `result` text reads
+`"It is a duplicate of <date> <title> (#<doc_id>)"`, which actually
+*names the existing document* that blocked the ingest. Parse that id to
+resolve the duplicate.
 
 ```sql
 SELECT
   id,
   type,
   status,
+  task_file_name,
   LEFT(result::text, 200) AS result_preview,
   date_created,
   date_done
@@ -329,12 +389,12 @@ ORDER BY date_created DESC
 LIMIT 20;
 ```
 
-For task status distribution (success vs failure vs started):
+For task status distribution by type (success vs failure vs started):
 
 ```sql
-SELECT status, COUNT(*) AS task_count
+SELECT status, type, COUNT(*) AS task_count
 FROM documents_paperlesstask
-GROUP BY status
+GROUP BY status, type
 ORDER BY task_count DESC;
 ```
 
@@ -343,56 +403,76 @@ ORDER BY task_count DESC;
 - **Read-only.** The MCP `postgres_query` tool is read-only. Never attempt
   `INSERT`/`UPDATE`/`DELETE`/`TRUNCATE` — write back through the Paperless
   web UI or REST API instead.
-- **`deleted_at` soft deletes.** 28 documents are soft-deleted in this
-  database. Always filter `WHERE deleted_at IS NULL` unless deliberately
-  querying the trash. The same applies to `documents_note`,
-  `documents_customfieldinstance` (both have `deleted_at`).
+- **`pg_stat_user_tables.n_live_tup` is stale and unreliable here.** Q1
+  uses it only to confirm a table *exists*. It undercounts drastically
+  (e.g. `auditlog_logentry` reports ~237 rows; real count is 43,188;
+  `documents_document_tags` reports 76; real count is 11,753). Always get
+  accurate counts with `SELECT COUNT(*) FROM <table>`.
+- **`deleted_at` soft deletes.** 28 documents are soft-deleted. Always
+  filter `WHERE deleted_at IS NULL` unless deliberately querying the
+  trash. `documents_customfieldinstance` and `documents_workflowrun` also
+  have `deleted_at`.
 - **`created` is a date, `added` is a timestamp.** `created` is the
-  document's own date (often backdated — e.g. a 1991 paper scanned in
-  2026); `added` is when Paperless ingested it. Use `added` for "recent"
-  and `created` for "in date range YYYY".
+  document's own date (often backdated — range is 1970-01-01 to
+  2026-07-31; the 1970 epoch is a mis-set date, not real); `added` is when
+  Paperless ingested it (range 2024-09-14 to present). Use `added` for
+  "recent" and `created` for "in date range YYYY".
 - **Two date columns, one ingest column.** `modified` is the last edit
-  timestamp; `added` is the first ingest. Do not confuse them when
-  auditing "what changed recently" — `auditlog_logentry.timestamp` is the
-  authoritative edit log.
+  timestamp; `added` is the first ingest. For authoritative edit history
+  query `auditlog_logentry` (43k rows) joined on `object_id =
+  documents_document.id`, ordered by `timestamp`.
+- **`auditlog_logentry.action` codes.** 0=create, 1=update, 2=delete
+  (smallint). `object_id` is the affected document's id (bigint, nullable).
+  `changes`/`changes_text` hold the field-level diff.
 - **Tags are flat, not a tree.** Despite the `tn_*` tree-node columns, all
-  tags in this instance have `tn_level = 1` and `tn_parent_id IS NULL`.
-  Query `tn_parent_id IS NULL` for the effective root set; do not write
+  tags have `tn_level = 1` and `tn_parent_id IS NULL`. Query
+  `tn_parent_id IS NULL` for the effective root set; do not write
   recursive CTEs expecting depth.
 - **Two inbox tags exist.** `documents_tag.is_inbox_tag = true` matches
   both "Inbox" (id 2) and the legacy "Renamed (Workflow)" tag (id 14).
-  Filter by `t.name = 'Inbox'` if you want only the live inbox.
-- **Custom field values are polymorphic and sparse.**
+  Filter by `t.name = 'Inbox'` for only the live inbox — which currently
+  holds 0 documents (the inbox is clear).
+- **Custom field values are polymorphic.**
   `documents_customfieldinstance` has one column per data type; only one
   is populated per row. Always `COALESCE` the value columns (see Q11).
   `value_monetary` stores a string like `'USD22.94'`;
-  `value_monetary_amount` stores the bare numeric. Custom fields exist on
-  only ~56 of ~2.5k documents — most documents have none.
+  `value_monetary_amount` stores the bare numeric (`22.94`). A few
+  monetary instances have both NULL (empty). Only `monetary`, `string`,
+  `date`, `integer` field types are in use. See the schema overview for
+  the full 13-field list with instance counts.
 - **`checksum` is MD5 of the original file; `archive_checksum` is MD5 of
   the archived PDF (often NULL when archiving is disabled).** Use
-  `checksum` for duplicate detection. No duplicate checksums exist in
-  this database — Paperless rejects them at ingest (visible as
-  `FAILURE` tasks in `documents_paperlesstask`).
-- **`archive_serial_number` is almost always NULL.** Only 2 of ~2.5k
+  `checksum` for duplicate detection. No duplicate checksums exist among
+  active documents — Paperless rejects them at ingest (visible as
+  `FAILURE` tasks in `documents_paperlesstask`, see Q12).
+- **`archive_serial_number` is almost always NULL.** Only 2 of 2,559
   documents have one. Do not rely on it as a stable identifier; use `id`.
-- **`documents_storagepath` is empty.** No custom storage paths are
-  configured; `storage_path_id` is NULL on every document. Skip
-  storage-path joins.
-- **`documents_note` is empty.** No notes are attached to any document.
-  Do not expect note content.
-- **Title format convention.** Titles follow
-  `YYYY-MM-DD <Correspondent> ----- <Description>` (with literal ` ----- `
-  separator) for most documents. Search the part after the separator to
-  match descriptions regardless of date/correspondent prefix:
-  `title ILIKE '%-----%description%'`.
+- **`transaction_id` is unused.** 0 documents populate it. Ignore it as a
+  correlation key.
+- **`storage_type` is always `"unencrypted"`; `owner_id` is NULL (global)
+  for 2,484 of 2,531 active docs** (user 4 owns the other 47). Do not
+  expect per-user isolation.
+- **`documents_storagepath` and `documents_note` are empty.** No custom
+  storage paths or notes exist. Skip storage-path joins; do not expect
+  note content.
+- **Title format varies.** The dominant convention is
+  `YYYY-MM-DD - <Correspondent> - <Description> ($amount)` using ` - `
+  separators (often with a `($amount)` suffix for receipts). Only ~6% of
+  documents (154 of 2,531) use the ` ----- ` separator
+  (`YYYY-MM-DD <Correspondent> ----- <Description>`); treat that as a
+  minority variant, not the rule. Date ranges use
+  `YYYY-MM-DD to YYYY-MM-DD - ...`. For description matching regardless
+  of prefix, search the tail of the title with
+  `title ILIKE '%- %description%'`.
 - **`content` is the OCR'd plaintext**, not the raw PDF. It is
   searchable with `ILIKE` but may contain OCR errors; prefer `title`
   lookups when precision matters.
 - **Task `result` column is text.** Cast with `result::text` and truncate
-  with `LEFT(..., 200)` to avoid huge payloads in the response.
-- **Do not use `psql`.** The database host (`nas...:32768`) may not be
-  resolvable from the agent's environment, and credentials should not be
-  handled directly. Always go through `postgres_query`.
+  with `LEFT(..., 200)` to avoid huge payloads in the response. Failure
+  results embed the existing duplicate's id as `(#<doc_id>)`.
+- **Do not use `psql`.** The database host may not be resolvable from the
+  agent's environment, and credentials should not be handled directly.
+  Always go through `postgres_query`.
 
 ## Output format
 
