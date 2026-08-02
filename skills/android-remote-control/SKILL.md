@@ -399,22 +399,58 @@ android_get_screen_state
 android_tap x=1697 y=<gap_center_y>
 ```
 
-If the toggle is OFF and gets tapped ON, a confirmation dialog appears:
-```
-android_find_nodes by="text" value="Allow"
-# or
-android_find_nodes by="text" value="OK"
-android_click_node node_id="<button_node_id>"
-```
+If the toggle is OFF and gets tapped ON, a confirmation dialog appears
+ON THE HOST LAPOP (not the Android device) requesting ADB authorization.
+The user must accept this popup manually — there is no way to auto-accept
+from the MCP tools.
 
-The dialog says "Allow wireless debugging on this network?" with the
-network name shown. Tap "Allow" / "OK" to confirm.
+**WAIT for user confirmation when enabling ADB.** After tapping the toggle
+or running `adb settings put global adb_wifi_enabled 1`, pause and ask the
+user to confirm any authorization popup:
+
+```
+# After tapping the toggle:
+android_find_nodes by="text" value="Allow"
+# If found, tap it. If not found, the popup may be on the host laptop —
+# ask the user to accept it manually, then proceed.
+android_click_node node_id="<allow_button_id>"
+```
 
 After enabling, the Wireless debugging sub-page opens automatically (or
 tap the row text area on the left side to open it). This page shows:
 - IP address & port (e.g. `192.168.1.100:37123`)
 - Pair device with pairing code
 - Already paired devices list
+
+#### Bypassing the UI toggle via ADB settings provider
+
+If USB debugging is already enabled and ADB is connected, wireless debugging
+can be toggled programmatically without touching the Samsung custom view:
+
+```bash
+# Enable
+adb -s <serial> shell settings put global adb_wifi_enabled 1
+
+# Disable
+adb -s <serial> shell settings put global adb_wifi_enabled 0
+
+# Check state
+adb -s <serial> shell settings get global adb_wifi_enabled
+
+# Check port (returns null if daemon not started)
+adb -s <serial> shell settings get global adb_wifi_port
+```
+
+This sets the flag but may NOT start the wireless ADB daemon on all devices.
+For a reliable start, use `adb tcpip`:
+```bash
+adb -s <serial> tcpip 5555
+sleep 3
+adb -s <serial> shell "netstat -tlnp | grep 5555"  # verify port is listening
+```
+
+This approach avoids the Samsung custom view issue entirely. See the `adb`
+skill for full ADB wireless debugging procedures.
 
 #### Reading the IP address and port
 
@@ -839,10 +875,27 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
   `android_get_node_details` for the full text. Individual paragraph/heading
   `View` nodes may also appear but are not guaranteed.
 
+- **ADB authorization popups appear on the HOST LAPTOP, not the Android
+  device.** When enabling USB debugging or wireless debugging, the ADB
+  authorization popup ("Allow USB debugging?") shows on the host laptop
+  running the ADB client, not on the Android device's screen. The MCP tools
+  cannot interact with host-side popups. After enabling ADB, PAUSE and ask
+  the user to confirm any popup before proceeding. This is a security feature
+  — there is no way to auto-accept from the device side.
+
 - **`open_uri` with a plain `android.settings.DEVELOPER_SETTINGS` URI fails
   with "No app found to handle URI."** Use `android_send_intent` with
   `type="activity"` and `action="android.settings.APPLICATION_DEVELOPMENT_SETTINGS"`
   instead — intents handle settings actions that URIs cannot.
+
+- **Wireless debugging direct intents fail on Samsung.** All of these
+  return "No activity found to handle intent":
+  - `android.settings.WIRELESS_DEBUGGING_SETTINGS`
+  - `com.android.settings.WIRELESS_DEBUGGING`
+  - `com.android.settings/com.android.settings.Settings$WifiDebuggingActivity`
+  The only way to reach Wireless debugging on Samsung is scrolling to the
+  gap in Developer Options and tapping coordinates, or using `adb shell
+  settings put global adb_wifi_enabled 1` if ADB is already connected.
 
 - **The MCP server runs as a foreground notification.** It appears in the
   notification list as "MCP Server Running" (ongoing, not clearable). Closing
