@@ -322,15 +322,188 @@ by taking a screenshot or re-reading the tree.
 
 ### Wireless debugging (Android 11+)
 
-Wireless debugging is a separate sub-page entry below USB debugging in
-Developer Options. Find "Wireless debugging" in the tree:
+Wireless debugging allows ADB connections over Wi-Fi without a USB cable. The
+device and host must be on the same network. It requires Developer Options to
+be enabled first (master switch ON).
+
+#### Layout in Developer Options
+
+Wireless debugging appears in the "Debugging" section of Developer Options,
+between "3GPP AT commands" and "Disable adb authorization timeout".
+
+**Samsung One UI gotcha (critical):** Like the USB debugging toggle, the
+"Wireless debugging" row is a custom Samsung preference view that is **NOT
+exposed in the accessibility tree**. `find_nodes by="text" value="Wireless
+debugging"` returns empty. The row appears as a visible gap in the node tree
+between the "3GPP AT commands" row and the "Disable adb authorization timeout"
+row.
+
+To locate the gap:
+```
+android_send_intent type="activity" action="android.settings.APPLICATION_DEVELOPMENT_SETTINGS"
+android_wait_for_idle timeout=2500
+android_scroll direction="down" amount="large"
+android_find_nodes by="text" value="Revoke USB debugging authorizations"
+```
+
+The "Revoke USB debugging authorizations" row confirms the Debugging section.
+Scroll down a small amount more to bring "3GPP AT commands" and the gap (where
+Wireless debugging sits) into view. Then get the screen state:
+```
+android_get_screen_state
+```
+
+Look for the gap between the bottom of the "3GPP AT commands" row and the top
+of the "Disable adb authorization timeout" row. Example bounds:
+```
+3GPP AT commands row:     bottom=802
+Disable adb timeout row:  top=995
+Gap height:               ~193px (center y ≈ 898)
+```
+
+#### Checking if wireless debugging is enabled
+
+Because the toggle is not in the tree, its state cannot be read directly
+via `find_nodes`. Approaches:
+
+1. **Check the notification shade** — when wireless debugging is ON, Android
+   shows an ongoing notification "Wireless debugging connected" or similar.
+   ```
+   android_notification_list
+   ```
+   Look for a notification from `com.android.settings` or
+   `com.android.systemui` with "wireless" or "adb" in the title.
+
+2. **Use `adb` from the host** (if ADB is already connected via USB or
+   another method):
+   ```bash
+   adb shell settings get global adb_wifi_enabled
+   ```
+   Returns `1` if enabled, `0` if disabled. This is a settings provider
+   value that works regardless of OEM customization.
+
+3. **Screenshot** — request a screenshot to visually inspect the toggle
+   state (ON = blue/green, OFF = gray). This model cannot process images;
+   the user must verify visually.
+
+#### Enabling wireless debugging
+
+Because the row is a Samsung custom view not in the a11y tree, tapping
+coordinates in the gap is the fallback:
 
 ```
-android_find_nodes by="text" value="Wireless debugging"
+# Get current screen state to find the gap bounds
+android_get_screen_state
+# Calculate: gap_center_y = (3gpp_row_bottom + adb_timeout_row_top) / 2
+# Tap the switch area (right side of the row):
+android_tap x=1697 y=<gap_center_y>
 ```
 
-Tap the row to open the Wireless debugging detail page, which shows the IP
-address and port, and a toggle to enable/disable it.
+If the toggle is OFF and gets tapped ON, a confirmation dialog appears:
+```
+android_find_nodes by="text" value="Allow"
+# or
+android_find_nodes by="text" value="OK"
+android_click_node node_id="<button_node_id>"
+```
+
+The dialog says "Allow wireless debugging on this network?" with the
+network name shown. Tap "Allow" / "OK" to confirm.
+
+After enabling, the Wireless debugging sub-page opens automatically (or
+tap the row text area on the left side to open it). This page shows:
+- IP address & port (e.g. `192.168.1.100:37123`)
+- Pair device with pairing code
+- Already paired devices list
+
+#### Reading the IP address and port
+
+On the Wireless debugging detail page, the IP:port is displayed. If the
+page nodes are exposed (not always the case on Samsung), find them:
+```
+android_find_nodes by="text" value="IP"
+# or search for an IP address pattern
+android_find_nodes by="class_name" value="android.widget.TextView"
+# Then use android_get_node_details to read full text of candidate nodes
+```
+
+If the IP:port is not in the tree (Samsung custom view), use the
+notification — the "Wireless debugging" ongoing notification often shows
+the IP and port in its text:
+```
+android_notification_list
+```
+
+Alternatively, from the host with USB ADB connected:
+```bash
+adb shell settings get global adb_wifi_port
+adb shell ifconfig wlan0 | grep "inet "
+```
+
+#### Pairing with a code
+
+Wireless debugging uses a pairing code flow for first-time connections.
+On the Wireless debugging detail page, tap "Pair device with pairing code"
+to get a pairing code, IP, and port. From the host:
+```bash
+adb pair <ip>:<pair_port>
+# Enter the 6-digit pairing code when prompted
+```
+
+After pairing, connect normally:
+```bash
+adb connect <ip>:<connect_port>
+```
+
+Note: the pairing port and the connection port are **different**. Use the
+pairing port for `adb pair`, and the main port (shown at the top of the
+Wireless debugging page) for `adb connect`.
+
+#### Disabling wireless debugging
+
+Tap the same gap coordinates again to toggle OFF. No confirmation dialog
+appears when disabling. Or from the host:
+```bash
+adb shell settings put global adb_wifi_enabled 0
+```
+
+### Troubleshooting ADB / wireless debugging
+
+**Cannot find Wireless debugging in the tree:**
+- It is a Samsung One UI custom view — not exposed via accessibility. Use
+  coordinate tapping in the gap between "3GPP AT commands" and "Disable adb
+  authorization timeout".
+- On non-Samsung devices (Pixel, etc.), it should appear as a normal row
+  with `find_nodes by="text" value="Wireless debugging"`.
+
+**Direct intent for Wireless debugging fails:**
+- `android.settings.WIRELESS_DEBUGGING_SETTINGS` → "No activity found"
+- `com.android.settings.WIRELESS_DEBUGGING` → "No activity found"
+- `com.android.settings/com.android.settings.Settings$WifiDebuggingActivity`
+  → "No activity found"
+- None of these work. The only way to reach Wireless debugging is through
+  the Developer Options screen via scrolling + coordinate tap.
+
+**Wireless debugging toggle won't respond to taps:**
+- Ensure the master "Developer options" toggle at the top is ON
+  (`com.android.settings:id/sesl_switchbar_switch` text="On").
+- Ensure Wi-Fi is connected — wireless debugging requires an active Wi-Fi
+  connection. If Wi-Fi is off, the toggle is disabled.
+- Try tapping different x-coordinates within the gap: left side (text area)
+  to open the sub-page, right side (switch area, x≈1697) to toggle.
+
+**ADB connection from host fails:**
+- Verify the device and host are on the same network.
+- Verify the port is correct — it changes each time wireless debugging is
+  toggled. Re-read it from the device after each toggle.
+- Check for firewall rules blocking the port on the host.
+- Try `adb kill-server && adb start-server` then `adb connect`.
+- The connection port and pairing port are different numbers.
+
+**USB debugging toggle won't respond to taps (Samsung):**
+- Same Samsung custom view issue as Wireless debugging. The USB debugging
+  toggle sits in the gap between the "Debugging" section header and "Revoke
+  USB debugging authorizations". Use coordinate tapping in that gap.
 
 ### Verify developer options is enabled
 
