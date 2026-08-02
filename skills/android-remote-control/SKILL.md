@@ -921,6 +921,23 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
 - **Device log timestamps do not include the year.** Filtering across year
   boundaries (e.g. December to January) may be inaccurate.
 
+- **Scrolling long settings lists is imprecise.** Developer Options has dozens
+  of rows spanning multiple screen heights. `android_scroll amount="large"`
+  overshoots or undershoots unpredictably. The reliable approach is to scroll,
+  then `android_find_nodes` for a known anchor text near the target (e.g.
+  "3GPP" or "Revoke USB debugging"), then scroll a small amount to fine-tune
+  position. If the anchor is not found, scroll the opposite direction in small
+  increments until it appears. Do NOT rely on a single scroll landing in the
+  right spot.
+
+- **Samsung custom preference rows are invisible AND untappable via
+  coordinates.** The USB debugging and Wireless debugging toggles in Samsung
+  One UI Developer Options are custom views that (1) do not appear in the
+  accessibility tree, and (2) do not respond to `android_tap` at coordinate
+  locations within the visible gap. The only reliable way to toggle these is
+  via `adb shell settings put global <key> <value>` if ADB is already
+  connected, or by having the user tap them manually on the screen.
+
 ## Workflow
 
 1. **Confirm MCP is connected:** `android_list_storage_locations` (returns

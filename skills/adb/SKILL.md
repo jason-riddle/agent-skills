@@ -328,6 +328,20 @@ services that can be used for auto-discovery.
   service doesn't actually start until the UI toggle is flipped. Use
   `adb tcpip PORT` for a reliable start.
 
+- **Samsung One UI Developer Options toggles are invisible to accessibility
+  AND untappable via coordinates.** The USB debugging and Wireless debugging
+  toggle rows in Samsung One UI are custom preference views that do not appear
+  in the accessibility tree and do not respond to coordinate taps. The ONLY
+  reliable way to toggle them programmatically is via `adb shell settings put
+  global <key> <value>` (if ADB is already connected). For first-time setup
+  without ADB, the user must tap them manually on the device screen.
+
+- **`adb wifi_enabled` settings key is `adb_wifi_enabled`, not
+  `adb_wireless_enabled` or `wireless_adb`.** The settings provider key is
+  `adb_wifi_enabled` in the `global` namespace. Similarly, the port is
+  `adb_wifi_port`. These are not documented but discoverable via
+  `adb shell settings list global | grep adb`.
+
 - **Emulators use `eth0`, not `wlan0`.** When getting the IP address for
   wireless ADB on an emulator, check `eth0` (or `eth5` on ChromeOS Crostini
   containers). Physical devices use `wlan0`.
