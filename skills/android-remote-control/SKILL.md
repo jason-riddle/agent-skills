@@ -118,7 +118,23 @@ android_tap_node node_id="<chrome_icon_node_id>"
 ```
 
 After launching, call `android_get_screen_state` to see Chrome's UI. On a new
-tab the URL bar has `res_id=com.android.chrome:id/url_bar` or
+tab the URL bar has `res_id=com.android.chrome:id/url_bar` (toolbar) or
+`com.android.chrome:id/search_box_text` (large centered search box on the
+new tab page).
+
+### Chrome toolbar resource IDs
+
+| Element | resource_id | content_desc |
+|---------|-------------|--------------|
+| URL bar | `com.android.chrome:id/url_bar` | - |
+| Home button | `com.android.chrome:id/home_button` | "Open the home page" |
+| New tab button | `com.android.chrome:id/optional_toolbar_button` | "New tab" |
+| Tab switcher | `com.android.chrome:id/tab_switcher_button` | "See N tabs" |
+| 3-dot menu | `com.android.chrome:id/menu_button` | "Customize and control Google Chrome" |
+| Voice search | `com.android.chrome:id/mic_button` | "Start voice search" |
+| Google Lens | `com.android.chrome:id/lens_camera_button` | "Search with your camera using Google Lens" |
+
+On the new-tab page there is also a large centered search box:
 `com.android.chrome:id/search_box_text`.
 
 ## Go to a website using Chrome
@@ -139,8 +155,84 @@ android_type_append_text node_id="<url_bar_node_id>" text="https://example.com"
 android_press_key key="ENTER"
 ```
 
+**Via clipboard paste into the URL bar (two methods):**
+
+Method 1 — Chrome auto-detects clipboard URLs. When the URL bar is focused and
+the clipboard contains a URL, Chrome shows a "Link you copied" suggestion in
+the omnibox dropdown. Tap it:
+```
+android_set_clipboard text="https://example.com"
+android_find_nodes by="resource_id" value="com.android.chrome:id/url_bar"
+android_click_node node_id="<url_bar_node_id>"
+android_find_nodes by="text" value="Link you copied"
+android_click_node node_id="<link_you_copied_node_id>"
+```
+
+Method 2 — long-press the URL bar to bring up the Paste popup:
+```
+android_set_clipboard text="https://example.com"
+android_find_nodes by="resource_id" value="com.android.chrome:id/url_bar"
+android_click_node node_id="<url_bar_node_id>"
+# Re-find the node (ID may change after focus):
+android_find_nodes by="resource_id" value="com.android.chrome:id/url_bar"
+android_long_click_node node_id="<url_bar_node_id>"
+android_find_nodes by="text" value="Paste"
+# click_node may fail on the popup; use tap_node instead:
+android_tap_node node_id="<paste_node_id>"
+android_press_key key="ENTER"
+```
+
 After navigation, call `android_get_screen_state` or `android_find_nodes` to
-verify the page loaded.
+verify the page loaded. For slow pages, use `android_wait_for_node` with a
+known page text (e.g. `value="Example Domain"`).
+
+### Reading page content
+
+When a page loads in Chrome, the WebView content is exposed as a single
+`WebView` node whose `text` field contains a flattened text dump of the page
+(headings, links, and body text concatenated). This is often truncated in the
+node table — call `android_get_node_details` to retrieve the full text.
+
+For pages with many text elements (news feeds, articles), individual `View`
+and `TextView` nodes may also appear, each containing a paragraph or heading.
+Use `android_find_nodes by="text" value="..."` to locate specific content.
+
+Scrolling a web page uses the same `android_scroll` tool — the scroll targets
+the focused scrollable container (the WebView).
+
+### Chrome 3-dot menu
+
+Tap the menu button (`com.android.chrome:id/menu_button`) to open a popup with:
+- Top row: Forward, Bookmark, Download, Page info, Refresh
+- Menu items: New tab, New Incognito tab, Add tab to new group, History,
+  Delete browsing data, Downloads, Bookmarks, Recent tabs
+
+Each menu item has a `resource_id` like `com.android.chrome:id/new_tab_menu_id`,
+`com.android.chrome:id/open_history_menu_id`, etc.
+
+Press `android_press_back` to dismiss the menu without selecting.
+
+### Chrome tab switcher
+
+Tap the tab switcher button (`com.android.chrome:id/tab_switcher_button`,
+content_desc "See N tabs") to open a grid view of all open tabs. Each tab card
+has:
+- A title TextView (`com.android.chrome:id/tab_title`) whose `text` is the
+  page title and `content_desc` is `<title>, Tab`
+- A close button (`com.android.chrome:id/action_button`) with content_desc
+  `Close <title> tab`
+
+To switch to a tab, tap its card (`FrameLayout` containing the title). To
+close a tab, tap its close button. Press `android_press_back` to return to
+the current tab without switching.
+
+The tab count is visible in the tab switcher button's content_desc: "See 8
+tabs". Use this to monitor how many tabs are open.
+
+### Refresh / reload a page
+
+Open the 3-dot menu and tap "Refresh" (`com.android.chrome:id/button_five`),
+or use `android_open_uri` with the same URL to force a reload.
 
 ### Opening other URI types
 
@@ -543,6 +635,36 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
 - **The on-screen keyboard covers elements after typing.** Type tools leave
   the keyboard open. Call `android_dismiss_keyboard` before tapping elements
   that may be hidden behind it.
+
+- **The Samsung keyboard is fully exposed in the a11y tree.** When the
+  keyboard is open, every individual key appears as a `ViewGroup` node with
+  the key label as its `content_desc` (e.g. `desc="q"`, `desc="Go"`, `desc="Space bar"`).
+  This inflates the node count significantly. To find non-keyboard elements,
+  filter by `class_name` (e.g. `android.widget.TextView`, `android.widget.EditText`)
+  or `resource_id` to avoid matching keyboard keys.
+
+- **`click_node` may fail on popup/overlay elements; use `tap_node` instead.**
+  The Chrome paste popup (after long-pressing the URL bar) returns
+  `ACTION_CLICK failed on node` when using `click_node`. The same node works
+  with `tap_node` (coordinate-based tap within the node bounds). Prefer
+  `tap_node` for any overlay, popup, or floating menu element.
+
+- **Chrome auto-detects clipboard URLs in the omnibox.** When the URL bar is
+  focused and the clipboard contains a URL, Chrome shows a "Link you copied"
+  suggestion at the top of the omnibox dropdown. Tapping it navigates
+  directly — no paste needed. This is the fastest way to open a URL that was
+  copied programmatically via `android_set_clipboard`.
+
+- **Node IDs change when focus shifts.** After clicking the URL bar to focus
+  it, the URL bar's `node_id` changes (the tree is rebuilt with the focused
+  state). Re-run `android_find_nodes` before interacting with the same element
+  after a focus change.
+
+- **WebView page content is a single flattened text node.** Chrome renders
+  page content as one `WebView` node whose `text` is all visible page text
+  concatenated (headings, links, body). The node table truncates this — use
+  `android_get_node_details` for the full text. Individual paragraph/heading
+  `View` nodes may also appear but are not guaranteed.
 
 - **`open_uri` with a plain `android.settings.DEVELOPER_SETTINGS` URI fails
   with "No app found to handle URI."** Use `android_send_intent` with
