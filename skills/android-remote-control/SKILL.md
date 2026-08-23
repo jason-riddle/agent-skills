@@ -1040,6 +1040,40 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
   string `NETWORK` or `LOCALHOST`, not the literal IP. `port` is stored as a
   varint. Booleans are stored as `08 01` (true) or `08 00` (false).
 
+- **`cmd notification get-listeners` does NOT exist on Android 16.** The
+  `allow_listener` subcommand works, but there is no `get-listeners`
+  counterpart — running it returns `Unknown command: get-listeners`. To
+  verify a notification listener is registered, query the settings provider:
+  `adb -s <S> shell settings get secure enabled_notification_listeners`. The
+  output is a colon-separated list of `ComponentName` entries; the MCP app's
+  listener appears as `<app-id>/.services.notifications.McpNotificationListenerService`.
+
+- **Uninstalling the app auto-cleans accessibility + notification-listener
+  settings.** When you uninstall the MCP app, Android removes its entries
+  from `settings secure enabled_accessibility_services` and
+  `enabled_notification_listeners` automatically. No manual `settings delete`
+  is needed. If you've installed a new build alongside the old one and
+  enabled the new build's accessibility/listener services, uninstalling the
+  old build leaves only the new build's entries in place — the settings
+  remain valid.
+
+- **The Server tab UI can show stale state during a restart.** Immediately
+  after `am start … --es action stop` followed by `--es action start`, the
+  Server tab may still show "MCP Server status: Stopped" for a few seconds
+  even though the foreground service has already restarted and the HTTP
+  endpoint is responding 200. If the UI says "Stopped" but `ss -tlnp | grep
+  8080` shows the port listening and curl gets 200, trust the socket/curl —
+  the UI is lagging. Re-opening the app or waiting ~5s resolves it.
+
+- **Release builds are NOT debuggable — `run-as` is denied.** The datastore
+  file (`settings.preferences_pb`) is only readable via `run-as` on debug
+  builds. On release builds, there is no host-side way to read the bearer
+  token or other secrets from the datastore without root. Set the bearer
+  token yourself via `ADB_CONFIGURE --es bearer_token "<uuid>"` so you
+  already know it, OR read it off the Server tab in the app UI (it's
+  displayed as a masked UUID — tap to reveal, or use `android_find_nodes`
+  to read the adjacent node's text).
+
 ## Headless setup via ADB
 
 The MCP app can be fully configured and controlled from the command line via
@@ -1064,6 +1098,15 @@ adb -s $S shell settings put secure enabled_accessibility_services \
 # Enable notification listener (for android_notification_* tools)
 adb -s $S shell cmd notification allow_listener \
   $APP/com.danielealbano.androidremotecontrolmcp.services.notifications.McpNotificationListenerService
+
+# Verify notification listener is registered (DO NOT use `cmd notification
+# get-listeners` — it does not exist on Android 16). Use the settings provider:
+adb -s $S shell settings get secure enabled_notification_listeners
+# Should list the new app's listener service (plus any system listeners).
+
+# Verify accessibility service is registered
+adb -s $S shell settings get secure enabled_accessibility_services
+# Should list only the new app's accessibility service.
 
 # Runtime permissions (all optional — only grant what you need)
 adb -s $S shell pm grant $APP android.permission.POST_NOTIFICATIONS
@@ -1211,6 +1254,59 @@ curl -s -X POST $URL \
 Without the `Authorization: Bearer` header (or with a wrong token), the server
 returns HTTP 401. The MCP client config in Claude / Claude Code / etc. must
 send the bearer token in the `Authorization` header on every request.
+
+### Upgrading the app (side-by-side install + cutover)
+
+The release and debug builds have **different package IDs** (`…androidremotecontrolmcp` vs `…androidremotecontrolmcp.debug`), so they install side-by-side as separate apps. Use this to do a zero-downtime upgrade without risking the working old build:
+
+```bash
+S=100.100.10.224:41303
+APP_NEW=com.danielealbano.androidremotecontrolmcp
+APP_OLD=com.danielealbano.androidremotecontrolmcp.debug
+
+# 1. Download + verify the new APK (GMS release build for devices with Play Services)
+curl -L -o /tmp/arc.apk "https://github.com/danielealbano/android-remote-control-mcp/releases/download/v1.12.0/android-remote-control-mcp-v1.12.0-gms-release.apk"
+sha256sum /tmp/arc.apk  # verify against the published digest
+
+# 2. Install the new build ALONGSIDE the old one (does NOT touch the old build)
+adb -s $S install /tmp/arc.apk
+
+# 3. Stop the OLD build's MCP server to free port 8080
+adb -s $S shell am start \
+  -n $APP_OLD/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbServiceTrampolineActivity \
+  --es action stop
+sleep 3
+adb -s $S shell "ss -tlnp | grep 8080 || echo 'port free'"
+
+# 4. Grant permissions + enable accessibility/notification listener for NEW app
+#    (see "Grant permissions" section above — use $APP_NEW as the app ID)
+
+# 5. Configure the NEW build via ADB_CONFIGURE broadcast (reuse old credentials)
+#    Reuse: bearer_token, cloudflare_tunnel_token. Let regenerate: jwt_signing_secret.
+
+# 6. Start the NEW build's MCP server
+adb -s $S shell am start \
+  -n $APP_NEW/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbServiceTrampolineActivity \
+  --es action start
+sleep 5
+adb -s $S shell "ss -tlnp | grep 8080"  # should show *:8080
+
+# 7. Verify end-to-end (MCP initialize, tools/list=57, screen state, tunnel probe)
+
+# 8. Only after verification: uninstall the OLD build
+adb -s $S uninstall $APP_OLD
+```
+
+When the old build is uninstalled, Android automatically removes its
+accessibility-service and notification-listener entries from the secure
+settings — the new build's entries remain (they were added in step 4). No
+manual cleanup of `enabled_accessibility_services` /
+`enabled_notification_listeners` is needed.
+
+The wireless ADB pairing (IP:port) is system-level and survives app
+uninstalls — no re-pairing needed after an upgrade. Note the ADB **port**
+does change on device reboot or wireless-debugging toggle; see the `adb`
+skill for reconnection.
 
 ## Workflow
 
