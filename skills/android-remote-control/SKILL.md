@@ -938,6 +938,213 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
   via `adb shell settings put global <key> <value>` if ADB is already
   connected, or by having the user tap them manually on the screen.
 
+- **`ADB_CONFIGURE` broadcast updates the datastore but does NOT reconfigure
+  the live server.** Sending `--es binding_address "0.0.0.0"` while the MCP
+  server is running writes the value to the datastore, but the live socket
+  keeps its old binding (`127.0.0.1`). To apply config changes, stop and
+  start the server via the trampoline Activity (`--es action stop` then
+  `--es action start`). Only after restart does the new binding take effect.
+
+- **`binding_address` is stored as an enum string, not the IP literal.** In
+  the protobuf datastore (`settings.preferences_pb`), the value appears as
+  `NETWORK` (for `0.0.0.0`) or `LOCALHOST` (for `127.0.0.1`), not the literal
+  IP. Don't grep for `0.0.0.0` — grep for `binding_address` and read the
+  adjacent field.
+
+- **Bearer token is readable via `run-as` on debug builds.** On debuggable
+  builds (the `…-debug` APK), `adb shell run-as <app-id> cat …/settings.preferences_pb`
+  works without root. The token is a UUID stored in the `bearer_token` field.
+  On release builds, `run-as` is not permitted — root or the app UI are the
+  only ways to retrieve it.
+
+- **`0.0.0.0` binding is reachable over Tailscale without ADB port-forwarding.**
+  When `binding_address=0.0.0.0`, the MCP endpoint is directly reachable at
+  `http://<device_tailscale_ip>:8080/mcp` from any host on the tailnet. No
+  `adb forward` needed. This is the recommended mode for remote control over
+  Tailscale. The tradeoff: anyone on the tailnet can reach the endpoint — rely
+  on the bearer token (and/or OAuth) for auth, not network isolation.
+
+- **MCP session must be initialized before any tool call.** A bare `ping` or
+  `tools/call` without first calling `initialize` returns an error. Capture
+  the `mcp-session-id` from the `initialize` response headers and pass it in
+  the `mcp-session-id` header on all subsequent requests.
+
+- **`ss -tlnp` is the reliable port-listening check on Android 16.**
+  `netstat` may not be present on newer Android versions; `ss` is available
+  via toybox. Use `ss -tlnp | grep <port>` to verify the MCP server socket.
+
+## Headless setup via ADB
+
+The MCP app can be fully configured and controlled from the command line via
+ADB — no UI interaction required. This is the canonical way to provision a
+device for remote control when ADB is already connected (e.g. over Tailscale
+wireless debugging).
+
+App IDs:
+- **Debug build:** `com.danielealbano.androidremotecontrolmcp.debug`
+- **Release build:** `com.danielealbano.androidremotecontrolmcp`
+
+### Grant permissions
+
+```bash
+S=100.100.10.224:43823   # serial or IP:port
+APP=com.danielealbano.androidremotecontrolmcp.debug
+
+# Enable accessibility service (REQUIRED for screen introspection + actions)
+adb -s $S shell settings put secure enabled_accessibility_services \
+  $APP/com.danielealbano.androidremotecontrolmcp.services.accessibility.McpAccessibilityService
+
+# Enable notification listener (for android_notification_* tools)
+adb -s $S shell cmd notification allow_listener \
+  $APP/com.danielealbano.androidremotecontrolmcp.services.notifications.McpNotificationListenerService
+
+# Runtime permissions (all optional — only grant what you need)
+adb -s $S shell pm grant $APP android.permission.POST_NOTIFICATIONS
+adb -s $S shell pm grant $APP android.permission.CAMERA
+adb -s $S shell pm grant $APP android.permission.RECORD_AUDIO
+adb -s $S shell pm grant $APP android.permission.ACCESS_FINE_LOCATION
+adb -s $S shell pm grant $APP android.permission.ACCESS_COARSE_LOCATION
+adb -s $S shell pm grant $APP android.permission.ACCESS_BACKGROUND_LOCATION
+adb -s $S shell pm grant $APP android.permission.NEARBY_WIFI_DEVICES
+adb -s $S shell pm grant $APP android.permission.READ_MEDIA_IMAGES
+adb -s $S shell pm grant $APP android.permission.READ_MEDIA_VIDEO
+adb -s $S shell pm grant $APP android.permission.READ_MEDIA_AUDIO
+```
+
+All of these return exit code 0 and take effect immediately. The
+accessibility service setting is written to
+`settings put secure enabled_accessibility_services` and can be verified with
+`adb -s $S shell settings get secure enabled_accessibility_services`.
+
+### Configure the app
+
+The `ADB_CONFIGURE` broadcast updates the app's datastore. All extras are
+optional — only the ones provided are updated; the app does NOT need to be
+open. The command requires `android.permission.DUMP` (held by the adb shell
+UID; ordinary apps cannot use it).
+
+```bash
+adb -s $S shell am broadcast \
+  -a com.danielealbano.androidremotecontrolmcp.ADB_CONFIGURE \
+  -n $APP/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbConfigReceiver \
+  --es binding_address "0.0.0.0" \
+  --ei port 8080 \
+  --es bearer_token "your-secret-uuid"
+```
+
+Key extras (see upstream README for the full list):
+- `binding_address`: `127.0.0.1` (localhost, requires adb port-forward) or
+  `0.0.0.0` (all interfaces, reachable over the network)
+- `port`: HTTP/HTTPS server port
+- `bearer_token`: static token value
+- `bearer_token_enabled`: controls enforcement (NOT the value — clearing the
+  value while enabled fails CLOSED, it does NOT disable auth)
+- `oauth_enabled`: enable/disable the OAuth 2.1 server
+- `auto_start_on_boot`: start MCP server on device boot
+- `device_slug`: tool-name prefix (e.g. `pixel7` → `android_pixel7_tap`)
+
+### Start / stop the MCP server
+
+The server must be started via a trampoline Activity (Android 12+ foreground
+service exemption). Works even when the app is force-stopped.
+
+```bash
+# Start
+adb -s $S shell am start \
+  -n $APP/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbServiceTrampolineActivity \
+  --es action start
+
+# Stop
+adb -s $S shell am start \
+  -n $APP/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbServiceTrampolineActivity \
+  --es action stop
+```
+
+### Verify the server is running
+
+```bash
+# Check port is listening (0.0.0.0:8080 = all interfaces, 127.0.0.1:8080 = localhost only)
+adb -s $S shell "ss -tlnp 2>/dev/null | grep 8080"
+
+# Check foreground service is running
+adb -s $S shell dumpsys activity services $APP | grep -i foreground
+```
+
+### Reading the bearer token from the device
+
+If the bearer token was auto-generated (default on first launch) and you
+don't have it, you can read it from the app's datastore via `run-as` on
+debuggable builds:
+
+```bash
+# Debug build only — release builds are not debuggable, root required
+adb -s $S shell "run-as $APP cat /data/data/$APP/files/datastore/settings.preferences_pb" \
+  > /tmp/prefs.bin
+strings /tmp/prefs.bin | grep -A1 bearer_token
+```
+
+The datastore is a protobuf file (`settings.preferences_pb`). The bearer
+token appears as a UUID (e.g. `a089a667-5def-423e-911b-449067333896`). The
+file also contains `binding_address` (stored as enum string `NETWORK` or
+`LOCALHOST`, not the literal `0.0.0.0`/`127.0.0.1`), `port`, and other config
+fields.
+
+### Connecting to the MCP server
+
+Two modes:
+
+**Localhost (default, `binding_address=127.0.0.1`):** Use adb port forwarding.
+```bash
+adb -s $S forward tcp:8080 tcp:8080
+# Then connect to http://localhost:8080/mcp from the host
+```
+
+**Network (`binding_address=0.0.0.0`):** Reachable directly over the network.
+No port forwarding needed. Over Tailscale, the device IP (e.g.
+`100.100.10.224`) is reachable from the host.
+```
+http://<device_ip>:8080/mcp
+```
+
+### MCP protocol handshake (curl)
+
+The MCP endpoint is at `POST /mcp` (Streamable HTTP transport). A session
+must be initialized before any tool call:
+
+```bash
+TOKEN=<bearer_token>
+URL=http://<device_ip>:8080/mcp   # or http://localhost:8080/mcp with port-forward
+
+# Initialize — capture mcp-session-id from response headers
+curl -sD /tmp/headers.txt -X POST $URL \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
+
+SID=$(grep -i "mcp-session-id" /tmp/headers.txt | awk '{print $2}' | tr -d '\r')
+
+# List tools
+curl -s -X POST $URL \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SID" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# Get screen state (verify end-to-end)
+curl -s -X POST $URL \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "mcp-session-id: $SID" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"android_get_screen_state","arguments":{}}}'
+```
+
+Without the `Authorization: Bearer` header (or with a wrong token), the server
+returns HTTP 401. The MCP client config in Claude / Claude Code / etc. must
+send the bearer token in the `Authorization` header on every request.
+
 ## Workflow
 
 1. **Confirm MCP is connected:** `android_list_storage_locations` (returns
