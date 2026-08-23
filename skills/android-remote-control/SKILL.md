@@ -1074,6 +1074,29 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
   displayed as a masked UUID — tap to reveal, or use `android_find_nodes`
   to read the adjacent node's text).
 
+- **Prefer `binding_address=127.0.0.1` (localhost) + tunnel over `0.0.0.0`.**
+  When a Cloudflare tunnel is configured, the embedded cloudflared runs
+  inside the app process and connects to `localhost:8080` internally — it
+  does NOT need the server bound to `0.0.0.0`. With localhost binding, the
+  MCP endpoint is unreachable from the network (even over Tailscale) and
+  can only be reached through the tunnel, which is protected by CF Access
+  + the bearer token + HTTPS. `0.0.0.0` exposes the raw MCP endpoint to
+  anyone on the network who has the bearer token (one auth layer instead
+  of three). If you previously set `0.0.0.0` (e.g. during initial setup
+  before the tunnel was configured), switch back to `127.0.0.1` after the
+  tunnel is verified working. Confirm with `ss -tlnp | grep 8080` —
+  `[::ffff:127.0.0.1]:8080` is localhost-only, `*:8080` is all interfaces.
+
+- **CF Access service-token headers are required for programmatic tunnel
+  access.** When the public URL is fronted by Cloudflare Access, a plain
+  curl returns `HTTP 302` redirecting to the CF Access login page. To
+  programmatically hit the tunnel, pass both `CF-Access-Client-Id` and
+  `CF-Access-Client-Secret` headers (a CF Access service token configured
+  in the dashboard) IN ADDITION to the MCP `Authorization: Bearer` header.
+  Without all three, the request fails. The service token is configured in
+  the Cloudflare dashboard under Access → Service Tokens, not on the
+  device.
+
 ## Headless setup via ADB
 
 The MCP app can be fully configured and controlled from the command line via
@@ -1201,33 +1224,87 @@ fields.
 
 ### Connecting to the MCP server
 
-Two modes:
+**Recommended: localhost binding (`binding_address=127.0.0.1`) + Cloudflare tunnel.**
 
-**Localhost (default, `binding_address=127.0.0.1`):** Use adb port forwarding.
+This is the most secure configuration. The MCP server listens only on
+`127.0.0.1:8080` (loopback) — unreachable from the network even over
+Tailscale. The embedded cloudflared runs inside the app process and connects
+to `localhost:8080` internally, so the tunnel still works. Public access is
+funneled through the tunnel and protected by CF Access (service token /
+browser session) + the MCP bearer token + HTTPS.
+
+```bash
+# Set localhost binding
+adb -s $S shell am broadcast \
+  -a com.danielealbano.androidremotecontrolmcp.ADB_CONFIGURE \
+  -n $APP/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbConfigReceiver \
+  --es binding_address "127.0.0.1"
+# Restart server to apply (config changes do NOT take effect live)
+adb -s $S shell am start \
+  -n $APP/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbServiceTrampolineActivity \
+  --es action stop
+sleep 3
+adb -s $S shell am start \
+  -n $APP/com.danielealbano.androidremotecontrolmcp.services.mcp.AdbServiceTrampolineActivity \
+  --es action start
+sleep 5
+
+# Verify binding
+adb -s $S shell "ss -tlnp | grep 8080"
+# Should show: LISTEN  0  0  [::ffff:127.0.0.1]:8080  *:*
+
+# Direct Tailscale access should now be REFUSED (connection refused / HTTP 000)
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 5 \
+  -X POST http://<device_ip>:8080/mcp ...
+# Output: 000  ← expected; localhost binding blocks network access
+
+# Tunnel access still works (cloudflared hits localhost internally)
+curl -s -o /dev/null -w "%{http_code}\n" --max-time 10 \
+  -X POST https://<tunnel-host>/mcp \
+  -H "CF-Access-Client-Id: <cf_access_id>" \
+  -H "CF-Access-Client-Secret: <cf_access_secret>" \
+  -H "Authorization: Bearer <token>" ...
+# Output: 200
+```
+
+To reach the server locally without the tunnel (e.g. for debugging), use ADB
+port forwarding — this punches through the localhost binding from the host
+side via USB/wireless ADB:
 ```bash
 adb -s $S forward tcp:8080 tcp:8080
-# Then connect to http://localhost:8080/mcp from the host
+# Then connect to http://localhost:8080/mcp from the host (no CF Access needed)
 ```
 
-**Network (`binding_address=0.0.0.0`):** Reachable directly over the network.
-No port forwarding needed. Over Tailscale, the device IP (e.g.
-`100.100.10.224`) is reachable from the host.
-```
-http://<device_ip>:8080/mcp
-```
+**Network binding (`binding_address=0.0.0.0`) — NOT recommended.** Makes the
+MCP endpoint reachable directly over the network (including Tailscale) with
+ONLY the bearer token as auth. Anyone on the tailnet who knows the token has
+full control of the device. Only use this if you have no tunnel configured
+and accept the exposure. If you previously set `0.0.0.0`, switch back to
+`127.0.0.1` after setting up the tunnel.
 
 ### MCP protocol handshake (curl)
 
 The MCP endpoint is at `POST /mcp` (Streamable HTTP transport). A session
-must be initialized before any tool call:
+must be initialized before any tool call. The headers required depend on
+which access path you use:
 
 ```bash
-TOKEN=<bearer_token>
-URL=http://<device_ip>:8080/mcp   # or http://localhost:8080/mcp with port-forward
+# Via Cloudflare tunnel (recommended — works with localhost binding):
+#   - CF-Access-Client-Id + CF-Access-Client-Secret (CF Access service token)
+#   - Authorization: Bearer <mcp_bearer_token>
+URL=https://<tunnel-host>/mcp
+AUTH_HEADERS=(-H "CF-Access-Client-Id: <cf_id>"
+              -H "CF-Access-Client-Secret: <cf_secret>"
+              -H "Authorization: Bearer <mcp_token>")
+
+# Via ADB port-forward (local debugging only — no CF Access needed):
+adb -s $S forward tcp:8080 tcp:8080
+URL=http://localhost:8080/mcp
+AUTH_HEADERS=(-H "Authorization: Bearer <mcp_token>")
 
 # Initialize — capture mcp-session-id from response headers
 curl -sD /tmp/headers.txt -X POST $URL \
-  -H "Authorization: Bearer $TOKEN" \
+  "${AUTH_HEADERS[@]}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0.0"}}}'
@@ -1236,7 +1313,7 @@ SID=$(grep -i "mcp-session-id" /tmp/headers.txt | awk '{print $2}' | tr -d '\r')
 
 # List tools
 curl -s -X POST $URL \
-  -H "Authorization: Bearer $TOKEN" \
+  "${AUTH_HEADERS[@]}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "mcp-session-id: $SID" \
@@ -1244,7 +1321,7 @@ curl -s -X POST $URL \
 
 # Get screen state (verify end-to-end)
 curl -s -X POST $URL \
-  -H "Authorization: Bearer $TOKEN" \
+  "${AUTH_HEADERS[@]}" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "mcp-session-id: $SID" \
