@@ -589,6 +589,25 @@ with `gpg-preset-passphrase` before invoking sops.
 ## Gotchas
 
 - **NEVER use YAML folded scalar (`>-`) for multiple keys in `.sops.yaml`.** SOPS concatenates multi-line keys into a single space-joined string, producing one invalid recipient. Decryption fails with "no identity matched any of the recipients." Always use comma-separated keys on a single quoted line: `age: "key1,key2,key3"`. This affects both SSH keys (`ssh-ed25519 AAAA...,ssh-ed25519 BBBB...`) and age keys (`age1xxx...,age1yyy...`).
+- **`--age` flag does NOT bypass `.sops.yaml` path matching.** Even when you pass `--age` explicitly with recipients on the command line, sops still loads `.sops.yaml` from the input file's directory tree and requires the input filename to match a `path_regex`. If your input filename doesn't match any rule, sops fails with `error loading config: no matching creation rules found` — even though `--age` was provided. Workarounds: (a) run sops from a directory with no `.sops.yaml` in its parent tree, (b) name the input file to match an existing rule (e.g., `.env`), or (c) add a catch-all `path_regex: .*` rule to `.sops.yaml`.
+- **`sops updatekeys` operates on the encrypted file, but `path_regex` matches the plaintext filename.** If your `.sops.yaml` has `path_regex: \.env$` (matching plaintext `.env` at encrypt time), running `sops updatekeys --yes .env.enc` fails with `no matching creation rules found` because `.env.enc` doesn't match `\.env$` (it ends in `.enc`, not `.env`). To use `updatekeys`, either add a second rule matching `\.env\.enc$`, or rename the encrypted file to match the existing rule, or run `updatekeys` from a directory without `.sops.yaml` and pass recipients via `--age` on a fresh `--encrypt` instead.
+- **Binary format (`--input-type binary --output-type binary`) stores metadata as JSON appended to the blob.** Unlike YAML/JSON formats where the `sops:` block is at the bottom of a text file, binary format embeds a JSON object at the end of the binary data. To extract recipient info, find the last `{` byte in the file and parse forward as JSON:
+  ```python
+  import json
+  with open('secrets.enc', 'rb') as f:
+      data = f.read()
+  for i in range(len(data) - 1, -1, -1):
+      if data[i:i+1] == b'{':
+          try:
+              meta = json.loads(data[i:])
+              if 'sops' in meta:
+                  recipients = meta['sops'].get('age', [])
+                  print(f"{len(recipients)} recipients")
+                  break
+          except json.JSONDecodeError:
+              continue
+  ```
+- **If no available key can decrypt a file, the data key is unrecoverable — the original secret is permanently lost.** SOPS encrypts the data key to each recipient; if none of your private keys matches any recipient, there is no recovery path. The only option is to create new plaintext and re-encrypt fresh with current keys. The encrypted file's metadata block (plaintext) lists all recipients — compare fingerprints to confirm none match before discarding.
 - `sops --decrypt` prints to stdout; use `--output file.yaml` or `--in-place` to write to disk. Writing decrypted secrets to disk is usually undesirable — prefer stdout piped directly to the consuming process.
 - `sops secrets.yaml` (no flags) opens the file for interactive editing. In a non-interactive agent context, always use `--decrypt`, `--encrypt`, or `--extract` explicitly.
 - The `sops` metadata block at the bottom of every file (`sops:` key in YAML) is always stored in plaintext. Sensitive key metadata (key ARNs, age recipients, full SSH public keys) is visible to anyone with file access.
@@ -697,6 +716,55 @@ v3.9.1** but is unreliable before **v3.13.1**. Versions in the v3.9.x–v3.12.x
 range may reject valid `ssh-ed25519` keys with `malformed recipient: mixed
 case`. Always install v3.13.1+ when using SSH keys as recipients.
 Always confirm: `sops --version`.
+
+### Re-encrypting all files with the union of all recipients
+
+When consolidating keys across multiple machines or `.sops.yaml` configs,
+re-encrypt every secret with the union of all recipients so any single key
+can decrypt. Workflow:
+
+```bash
+# 1. Gather all recipients from every .sops.yaml on the system
+find ~ -name ".sops.yaml" -not -path "*/.git/*" 2>/dev/null \
+  | xargs grep -h "age:" \
+  | sed 's/^.*age: *//' \
+  | tr ',' '\n' \
+  | sed 's/^ *//;s/ *$//' \
+  | grep -v '^$' \
+  | sort -u > /tmp/recipients.txt
+
+# 2. Build comma-separated recipient string (no spaces around commas)
+RECIPIENTS=$(paste -sd, /tmp/recipients.txt)
+
+# 3. For each encrypted file, re-encrypt from plaintext (if available)
+#    or create placeholder plaintext if original is unrecoverable.
+# CRITICAL: run from a directory with no .sops.yaml in the parent tree,
+#           because --age does not bypass path_regex matching (see Gotchas).
+mkdir -p /tmp/sops-clean
+cp /path/to/.env /tmp/sops-clean/.env   # plaintext source
+cd /tmp/sops-clean
+sops --encrypt --age "$RECIPIENTS" \
+     --input-type binary --output-type binary \
+     --output /path/to/.env.enc /tmp/sops-clean/.env
+cd -  # leave the clean dir before processing the next file
+
+# 4. Verify: decrypt with each available key, confirm hash matches plaintext
+SOPS_AGE_SSH_PRIVATE_KEY_FILE=~/.ssh/id_ed25519 \
+  sops --decrypt --input-type binary --output-type binary /path/to/.env.enc \
+  | sha256sum
+# Compare to: sha256sum /path/to/.env
+```
+
+**Re-encrypt files one at a time, not in parallel.** Verify each succeeds
+(decryption with every available key + content hash match) before proceeding
+to the next, so a failure stops the batch rather than corrupting all files
+at once.
+
+**If the original plaintext is unavailable** (no key can decrypt the
+existing `.env.enc`), the original secret is permanently lost — see the
+Gotchas section on irrecoverable data keys. Create a placeholder plaintext
+file with comments documenting the loss, re-encrypt it, and manually re-add
+real secrets afterward.
 
 ### `.sops.yaml` creation rules match against the filename sops operates on
 
