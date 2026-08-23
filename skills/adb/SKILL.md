@@ -131,13 +131,52 @@ from the connection port).
 adb pair <device_ip>:<pairing_port>
 # Enter the 6-digit pairing code when prompted
 
+# Non-interactive: pipe the code via stdin (here-string)
+adb pair <device_ip>:<pairing_port> <<< "158875"
+
 # After pairing, connect to the main port (shown at top of Wireless debugging page)
 adb connect <device_ip>:<connection_port>
 ```
 
-The pairing port and connection port are **different numbers**. Use the
-pairing port only for `adb pair`, then use the connection port for
-`adb connect`.
+The pairing port and connection port are **different numbers**, and **both
+ports change every time wireless debugging is toggled off/on or the device
+reboots.** Never hardcode either port in scripts or notes — re-read or
+re-scan each session.
+
+Use the pairing port only for `adb pair`, then use the connection port for
+`adb connect`. After `adb pair` succeeds, the pairing port is closed —
+`adb connect` against it returns `Connection refused`.
+
+### Discovering the connection port
+
+The connection port is shown on the device's Wireless debugging screen. When
+you cannot read it from the screen (device unattended, remote over Tailscale),
+discover it from the host:
+
+1. **mDNS (same subnet only):** `adb mdns services` lists `adb-tls-connect`
+   services with their port. Fails across subnets/VPNs.
+2. **Scan the port range (Tailscale / cross-subnet):** ADB wireless debugging
+   ports are random high-numbered TCP ports. Scan the ephemeral range with a
+   short per-port timeout and high parallelism. On the open port, `adb
+   connect` will succeed; closed/refused ports skip.
+
+```bash
+# Fast parallel scan of the ephemeral range for a device IP
+IP=100.100.10.224
+# Scan 30000-60000 with 50 parallel workers, 0.2s timeout each
+seq 30000 60000 | xargs -P50 -I{} bash -c '
+  timeout 0.2 bash -c "</dev/tcp/'"$IP"'/{}/" 2>/dev/null && echo "OPEN: {}"
+' 2>/dev/null
+```
+
+Then try `adb connect $IP:$PORT` on each open port until one reports
+`connected`. Only the real ADB TLS port will accept the ADB handshake; other
+open ports (if any) will refuse the connect. Expect 1 open port on a device
+with wireless debugging active.
+
+If scan finds nothing: wireless debugging may be off, the device may be
+asleep, or the port is outside the scanned range. Ask the user to toggle
+Wireless debugging off/on (which re-randomizes the port) and re-scan.
 
 ### Disable wireless debugging
 ```bash
@@ -322,6 +361,22 @@ services that can be used for auto-discovery.
 - **Pairing port ≠ connection port.** The port shown in "Pair device with
   pairing code" is only for `adb pair`. After pairing, use the main port
   shown at the top of the Wireless debugging page for `adb connect`.
+  Once pairing succeeds, the pairing port is closed and refuses connections.
+
+- **`adb pair` accepts the pairing code via stdin.** For non-interactive
+  use (scripts, agent automation), pipe the 6-digit code with a here-string:
+  `adb pair <ip>:<port> <<< "158875"`. No interactive prompt appears.
+
+- **mDNS discovery does not work across subnets or VPNs (Tailscale).**
+  `adb mdns services` relies on multicast, which does not traverse routed
+  networks. When the device is reachable only via Tailscale (e.g. a tablet
+  at `100.100.10.x` paired from a ChromeOS host), mDNS returns nothing even
+  when wireless debugging is active. **Fall back to a port scan** (see
+  "Discovering the connection port" above): scan the ephemeral range
+  (30000-60000) in parallel, then `adb connect` each open port to find the
+  real ADB TLS listener. Ask the user to read the port off the device screen
+  only if the scan fails — reading the screen is the last resort, not the
+  first, since the port changes every session.
 
 - **`settings put global adb_wifi_enabled 1` does not start the daemon on all
   devices.** On some OEMs (Samsung), it sets the flag but the wireless ADB
@@ -390,12 +445,16 @@ adb reconnect device
 - Run `adb devices` to see all connected serials.
 
 ### Cannot connect wirelessly
-- Verify device and host are on the same network.
+- Verify device and host are on the same network (or reachable via Tailscale).
 - Verify the port: it changes each time wireless debugging is toggled. Re-read
-  it after each toggle.
+  it after each toggle — never hardcode it.
 - Try `adb disconnect` then `adb connect <ip>:<port>`.
 - Firewall on the host may block the port — check iptables / ufw.
 - For emulators, the IP is on eth0, not wlan0.
+- **Over Tailscale / cross-subnet:** mDNS discovery won't work. Scan the
+  ephemeral port range (30000-60000) in parallel for the device IP, then
+  `adb connect` each open port to find the real ADB listener. Ask the user
+  to read the port off the device screen only if the scan finds nothing.
 
 ### `adb tcpip` succeeds but `adb connect` fails
 - Wait 2-3 seconds after `adb tcpip` for the daemon to start listening.
