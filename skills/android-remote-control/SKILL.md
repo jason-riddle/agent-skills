@@ -973,6 +973,73 @@ android_custom_gesture paths=[[{"x":0,"y":0,"time":0},{"x":500,"y":500,"time":50
   `netstat` may not be present on newer Android versions; `ss` is available
   via toybox. Use `ss -tlnp | grep <port>` to verify the MCP server socket.
 
+- **cloudflared is embedded in the APK, not a separate binary.** When
+  `tunnel_enabled=true` and `cloudflare_tunnel_mode=TOKEN`, the cloudflared
+  tunnel runs as a goroutine/thread INSIDE the MCP app's own process — there
+  is no separate `cloudflared` binary or process on the device. So
+  `adb shell ps -A | grep cloudflared` returns nothing (expected). To verify
+  the tunnel is up: (1) check the MCP app process is alive
+  (`adb shell ps -A | grep androidremotecontrolmcp`), (2) probe the public
+  URL — a 302/200 response means the tunnel is alive, a DNS failure or
+  connection refused means it's down, (3) read the Server tab via
+  `android_get_screen_state` and check the Public URL field is populated.
+
+- **Cloudflare Access can front the public tunnel URL.** The public URL
+  (e.g. `https://arc.jasonriddle.com/mcp`) may be protected by Cloudflare
+  Access — a second auth layer on top of the MCP bearer token. Direct curl
+  to the public URL returns `HTTP 302` redirecting to
+  `jasonriddle.cloudflareaccess.com/cdn-cgi/access/login`. To hit the public
+  URL programmatically, you need a CF Access service token passed as
+  `CF-Access-Client-Id` and `CF-Access-Client-Secret` headers IN ADDITION to
+  the MCP `Authorization: Bearer` header. The CF Access policy is configured
+  in the Cloudflare dashboard, not on the device — it survives app reinstalls.
+
+- **Tunnel hostname is not in the datastore.** When using named-tunnel mode
+  (`cloudflare_tunnel_mode=TOKEN`), the datastore stores only the tunnel
+  token (a base64-encoded JSON with `a`=account ID, `t`=tunnel ID,
+  `s`=secret). The public hostname (e.g. `arc.jasonriddle.com`) is bound to
+  the tunnel ID in the Cloudflare dashboard — the app reads it from the
+  Cloudflare API after authenticating with the token. To preserve the public
+  URL across an app reinstall, reuse the same tunnel token (or don't delete
+  the named tunnel in the dashboard).
+
+- **`cloudflare_tunnel_token` decodes to JSON.** The token stored in the
+  datastore is base64-encoded JSON:
+  `{"a":"<account_id>","t":"<tunnel_uuid>","s":"<base64_secret>"}`. Decode
+  with `echo <token> | base64 -d` to inspect. The `s` field is itself a
+  base64-encoded secret (decodes to a UUID). Treat the whole token as a
+  secret — anyone with it can impersonate the tunnel.
+
+- **SAF storage locations (Nextcloud, Termux) cannot be re-added via ADB.**
+  User-added storage locations are SAF (Storage Access Framework)
+  authorizations — the `treeUri` is a persistent URI granted via the system
+  file picker. The picker must be tapped on the device screen; ADB cannot
+  grant SAF URIs. On app reinstall, the URI permissions are revoked with the
+  old app ID. To restore: open the app → Settings → Storage → add location →
+  pick root via system picker. The `allowWrite`/`allowDelete` flags CAN be
+  toggled via ADB_CONFIGURE (`storage_location_id` + `storage_allow_write`
+  + `storage_allow_delete` extras), but the location itself must first be
+  authorized via the picker.
+
+- **JWT signing secret is auto-generated and not settable via ADB.** The
+  `jwt_signing_secret` (43-char base64url string, 32-byte HMAC key) is used
+  to sign OAuth access tokens issued by the app's built-in OAuth 2.1 server.
+  It's auto-generated on first launch and NOT exposed as an ADB_CONFIGURE
+  extra. On reinstall, a new secret is generated — all previously-issued
+  OAuth tokens (Claude.ai and ChatGPT custom connectors) become invalid and
+  must be re-approved via the OAuth flow. To preserve OAuth clients across
+  an upgrade, you'd need to copy the secret into the new install's datastore
+  manually (requires root on release builds, or use a debug build so `run-as`
+  works).
+
+- **Protobuf datastore wire format.** The datastore file
+  `settings.preferences_pb` is a Jetpack DataStore protobuf. Each preference
+  is a `(key: string, value: wrapper_message)` pair. The wrapper's inner
+  fields: field 1 (varint) = booleans, field 3 (varint) = integers, field 5
+  (string) = strings/JSON/enums. `binding_address` is stored as the enum
+  string `NETWORK` or `LOCALHOST`, not the literal IP. `port` is stored as a
+  varint. Booleans are stored as `08 01` (true) or `08 00` (false).
+
 ## Headless setup via ADB
 
 The MCP app can be fully configured and controlled from the command line via
