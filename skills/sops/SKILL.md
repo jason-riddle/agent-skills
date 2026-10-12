@@ -283,21 +283,30 @@ your key is at one of the auto-discovery paths or set an env var explicitly.
 
 ### Multiple recipients (team / multi-environment)
 
-**Always use comma-separated keys on a single line.** Do NOT use YAML folded
-scalar (`>-`) with multiple keys on separate lines — SOPS concatenates them
-into one invalid recipient string (space-joined) and decryption fails silently.
+Prefer a YAML sequence with one recipient per item. In SOPS 3.13.3, a folded
+scalar (`>-`) with multiple keys separated only by newlines was parsed as one
+recipient, so the additional key could not decrypt. A `#` line inside that
+scalar was also treated as recipient text. Comma-separated recipients on one
+line remain supported.
 
 ```yaml
-# CORRECT — comma-separated on one line (works for both age and SSH keys)
+# CORRECT — one recipient per YAML sequence item
 creation_rules:
   - path_regex: .*\.yaml$
-    age: "age1alice...,age1bob...,age1ci..."
-  # SSH keys also comma-separated
+    age:
+      - age1alice...
+      - age1bob...
+      - age1ci...
+  # SSH recipients
   - path_regex: .*\.env$
-    age: "ssh-ed25519 AAAA...,ssh-ed25519 BBBB..."
-  # Mix age and SSH keys
+    age:
+      - ssh-ed25519 AAAA...
+      - ssh-ed25519 BBBB...
+  # Mix age and SSH recipients
   - path_regex: .*\.env$
-    age: "age1xxx...,ssh-ed25519 AAAA..."
+    age:
+      - age1xxx...
+      - ssh-ed25519 AAAA...
 ```
 
 ```bash
@@ -588,9 +597,10 @@ with `gpg-preset-passphrase` before invoking sops.
 
 ## Gotchas
 
-- **NEVER use YAML folded scalar (`>-`) for multiple keys in `.sops.yaml`.** SOPS concatenates multi-line keys into a single space-joined string, producing one invalid recipient. Decryption fails with "no identity matched any of the recipients." Always use comma-separated keys on a single quoted line: `age: "key1,key2,key3"`. This affects both SSH keys (`ssh-ed25519 AAAA...,ssh-ed25519 BBBB...`) and age keys (`age1xxx...,age1yyy...`).
+- **Represent multiple `.sops.yaml` recipients as a YAML sequence, one key per item.** SOPS 3.13.3 tests confirmed this works for age and SSH recipients, including comments between sequence items. In that version, a folded scalar with recipients separated only by newlines silently became one recipient; a comment inside the scalar became recipient text. A single-line comma-separated string is also supported.
+- **Choose input type from the content, not the filename suffix.** For encrypted files with ambiguous suffixes such as `.env.enc`, identify the actual format and pass the matching `--input-type` to `sops updatekeys` or decrypt operations; an `.enc` extension does not imply binary.
 - **`--age` flag does NOT bypass `.sops.yaml` path matching.** Even when you pass `--age` explicitly with recipients on the command line, sops still loads `.sops.yaml` from the input file's directory tree and requires the input filename to match a `path_regex`. If your input filename doesn't match any rule, sops fails with `error loading config: no matching creation rules found` — even though `--age` was provided. Workarounds: (a) run sops from a directory with no `.sops.yaml` in its parent tree, (b) name the input file to match an existing rule (e.g., `.env`), or (c) add a catch-all `path_regex: .*` rule to `.sops.yaml`.
-- **`sops updatekeys` operates on the encrypted file, but `path_regex` matches the plaintext filename.** If your `.sops.yaml` has `path_regex: \.env$` (matching plaintext `.env` at encrypt time), running `sops updatekeys --yes .env.enc` fails with `no matching creation rules found` because `.env.enc` doesn't match `\.env$` (it ends in `.enc`, not `.env`). To use `updatekeys`, either add a second rule matching `\.env\.enc$`, or rename the encrypted file to match the existing rule, or run `updatekeys` from a directory without `.sops.yaml` and pass recipients via `--age` on a fresh `--encrypt` instead.
+- **`sops updatekeys` applies `.sops.yaml` path matching to the encrypted filename it operates on.** A rule matching plaintext `\.env$` does not match `.env.enc`; likewise, `values\.ya?ml$` does not match `values.enc.yaml`. Include patterns for the encrypted paths when using `updatekeys`, while preserving any rules needed for encrypting plaintext files. With SOPS 3.13.3, `SOPS_CONFIG=/path/to/config sops updatekeys --yes --input-type FORMAT FILE` worked; `--config` after the `updatekeys` subcommand was rejected in the tested version.
 - **Binary format (`--input-type binary --output-type binary`) stores metadata as JSON appended to the blob.** Unlike YAML/JSON formats where the `sops:` block is at the bottom of a text file, binary format embeds a JSON object at the end of the binary data. To extract recipient info, find the last `{` byte in the file and parse forward as JSON:
   ```python
   import json
@@ -607,7 +617,7 @@ with `gpg-preset-passphrase` before invoking sops.
           except json.JSONDecodeError:
               continue
   ```
-- **If no available key can decrypt a file, the data key is unrecoverable — the original secret is permanently lost.** SOPS encrypts the data key to each recipient; if none of your private keys matches any recipient, there is no recovery path. The only option is to create new plaintext and re-encrypt fresh with current keys. The encrypted file's metadata block (plaintext) lists all recipients — compare fingerprints to confirm none match before discarding.
+- **If no available key can decrypt a file, stop and locate an authorized matching identity before changing it.** SOPS encrypts the data key to each recipient; without a matching private key the existing payload cannot be rewrapped. Do not replace it with guessed or placeholder plaintext. The encrypted file's metadata lists recipients; compare them to verified public-key fingerprints without exposing plaintext.
 - `sops --decrypt` prints to stdout; use `--output file.yaml` or `--in-place` to write to disk. Writing decrypted secrets to disk is usually undesirable — prefer stdout piped directly to the consuming process.
 - `sops secrets.yaml` (no flags) opens the file for interactive editing. In a non-interactive agent context, always use `--decrypt`, `--encrypt`, or `--extract` explicitly.
 - The `sops` metadata block at the bottom of every file (`sops:` key in YAML) is always stored in plaintext. Sensitive key metadata (key ARNs, age recipients, full SSH public keys) is visible to anyone with file access.
@@ -786,29 +796,13 @@ cp /tmp/plain.yaml .env.enc.yaml
 sops --encrypt --in-place .env.enc.yaml  # rule matches .env.enc.yaml
 ```
 
-### dotenv input/output format has a metadata parse bug
+### dotenv input/output format
 
-`sops --encrypt --input-type dotenv --output-type dotenv` appears to succeed
-but the resulting file cannot be decrypted — sops fails with:
-
-```
-parsing time "" as "2006-01-02T15:04:05Z07:00": cannot parse "" as "2006"
-```
-
-**Workaround**: convert `.env` key=value pairs to a flat YAML file first, then
-encrypt as YAML. Flat YAML (`KEY: value`) works reliably and can be sourced
-back as environment variables via `sops exec-env` or manual export.
-
-```bash
-# Convert .env to flat YAML, then encrypt
-grep -E '^[A-Z_]+=' .env | python3 -c "
-import sys
-for line in sys.stdin:
-    k, v = line.strip().split('=', 1)
-    print(f'{k}: {repr(v)}')
-" > secrets.enc.yaml
-sops --encrypt --in-place secrets.enc.yaml
-```
+An earlier report of a dotenv metadata parse failure was not reproduced in an
+isolated SOPS 3.13.3 roundtrip test containing comments and a blank value; that
+test preserved the file byte-for-byte. Explicitly select `--input-type dotenv`
+and `--output-type dotenv` when the content is dotenv, and test against the
+installed SOPS version before relying on behavior across versions.
 
 ## Reference
 
