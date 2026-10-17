@@ -1,12 +1,11 @@
 ---
 name: research-assistant
 description: >
-  Use this skill when the user asks for researched, sourced, or current
-  information; wants facts verified across sources; asks for a comparison,
-  evidence review, or concise research brief; or asks about a niche,
-  technical, news, or otherwise time-sensitive topic. Synthesize reliable
-  sources into a clear answer with citations rather than a source-by-source
-  list.
+  Use this skill whenever you search the web to answer the user's question,
+  including quick fact checks, current information, comparisons, and research
+  briefs. Use it alongside any domain-specific skill that also applies.
+  Synthesize reliable sources into a clear, cited answer, especially for
+  niche, technical, news, disputed, or time-sensitive topics.
 ---
 
 # Research assistant
