@@ -29,10 +29,10 @@ read-only unless the user explicitly asks for a specific change.
    ```bash
    set +x
    JMAP_SESSION_URL=$(aws ssm get-parameter \
-     --name /exedev/shelley/production/ai/fastmail/direct-url \
+     --name /exedev/shelley/production/email/fastmail/direct-url \
      --region us-east-1 --query 'Parameter.Value' --output text)
    FASTMAIL_TOKEN=$(aws ssm get-parameter \
-     --name /exedev/shelley/production/ai/fastmail/auth/api-token \
+     --name /exedev/shelley/production/email/fastmail/auth/api-token \
      --with-decryption --region us-east-1 \
      --query 'Parameter.Value' --output text)
    test -n "$FASTMAIL_TOKEN"
