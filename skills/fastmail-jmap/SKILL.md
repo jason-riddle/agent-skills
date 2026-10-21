@@ -2,19 +2,66 @@
 name: fastmail-jmap
 description: >
   Use this skill when the user wants to access Fastmail mail, contacts, or
-  Masked Email through Fastmail's JMAP API using curl; for example, to list
+  Masked Email through Fastmail's JMAP API using a credential-safe VM helper
+  or curl elsewhere; for example, to list
   inbox messages, search or fetch an email, inspect account capabilities, or
   build a shell-based Fastmail integration. Do not use it for calendar events,
   which use Fastmail's CalDAV interface, or for Fastmail's separate MCP API.
 ---
 
-# Fastmail JMAP with curl
+# Fastmail JMAP
 
-Use Fastmail's JMAP JSON API directly with curl. The endpoint returns mail
+Use Fastmail's JMAP JSON API with the local VM helper or curl elsewhere. The endpoint returns mail
 content and may modify or permanently delete messages; keep operations
 read-only unless the user explicitly asks for a specific change.
 
-## Authentication and safe setup
+## Shelley VM: local SOPS delivery only
+
+On Shelley's VM, use the fixed-path helper below. Do **not** read SSM, print
+credentials, run `sops --decrypt` directly, or populate shell token variables.
+The helper reads the approved hash-checked ciphertext release
+`29f833d1f234500c3c160659be4bce88e00fa87d` under
+`~/.local/share/shelley-secrets/releases/`, decrypts in memory using the existing
+VM SSH identity (kept outside that release), discovers the session internally,
+and returns only a status or requested method responses. No live NAS fetch or
+AWS fallback occurs. Python resolves `Path.home()` for these home paths.
+
+Status-only session + Core/echo, with no mailbox reads:
+
+```bash
+python3 "$HOME/.config/shelley/jobs/fastmail_jmap.py" check
+```
+
+For an authorized data lookup, send a bounded JSON request on stdin. Use the
+literal `$PRIMARY_MAIL_ACCOUNT` placeholder; the helper replaces it internally
+with the discovered primary mail account. Never dump the session object.
+
+```bash
+python3 "$HOME/.config/shelley/jobs/fastmail_jmap.py" request <<'JSON'
+{
+  "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail"],
+  "methodCalls": [["Mailbox/get", {
+    "accountId": "$PRIMARY_MAIL_ACCOUNT",
+    "ids": null,
+    "properties": ["id", "name", "role"]
+  }, "q"]]
+}
+JSON
+```
+
+Read only task-needed responses; check `methodResponses` for errors. The helper
+rejects write methods by default. Add `--allow-write` only after explicit
+present-task approval for the exact mutation; the flag is not authorization.
+Do not test writes during a connectivity check. The helper has no blob/download
+mode yet: stop for scoped implementation rather than bypassing credential
+handling or reading SSM. Missing release/key is a blocker, not permission to
+copy private identities or install software. SSM remains intact for explicit,
+reviewed rollback only.
+
+Skip the generic curl authentication/examples below on this VM. Their JMAP
+method shapes can be adapted to helper stdin, but do not extract its token.
+
+## Other hosts: authentication and safe curl setup
 
 1. Fastmail Settings → Privacy & Security → Manage API tokens → New API token.
    Select **JMAP**, then the narrowest scope that covers the task. Fastmail
@@ -22,28 +69,12 @@ read-only unless the user explicitly asks for a specific change.
    deleting mail; **Email submission** permits sending and requires Email.
    Contacts, Masked Email, and submission have separate scopes. API tokens
    are not available on Basic plans.
-2. On Shelley's VM, prefer the verified SSM parameters below. Keep the token
-   in shell memory; do not print, commit, or put it in chat. Disable shell
-   tracing and avoid command-line arguments or shell history:
+2. Use an approved secret manager or read the token interactively without echo.
+   Do not print, commit, or put it in chat. Disable shell tracing and avoid
+   command-line arguments or shell history. This branch is not for Shelley VM:
 
    ```bash
    set +x
-   JMAP_SESSION_URL=$(aws ssm get-parameter \
-     --name /exedev/shelley/production/email/fastmail/direct-url \
-     --region us-east-1 --query 'Parameter.Value' --output text)
-   FASTMAIL_TOKEN=$(aws ssm get-parameter \
-     --name /exedev/shelley/production/email/fastmail/auth/api-token \
-     --with-decryption --region us-east-1 \
-     --query 'Parameter.Value' --output text)
-   test -n "$FASTMAIL_TOKEN"
-   ```
-
-   These parameters are available only to an AWS identity authorized for
-   their path and KMS key; SSM does not make the credential available to other
-   hosts automatically. Elsewhere, use an approved secret manager or read it
-   interactively without echo:
-
-   ```bash
    read -rsp 'Fastmail JMAP token: ' FASTMAIL_TOKEN
    printf '\n'
    JMAP_SESSION_URL=https://api.fastmail.com/jmap/session
@@ -249,9 +280,9 @@ send the email or its attachments to an unrelated external service.
   the account password.
 - The API endpoint is not a REST resource-per-email API: send JMAP method calls
   as JSON to the session's advertised `apiUrl`.
-- Fastmail's session endpoint is stored in SSM as `direct-url`; it is session
-  discovery, not the API URL for subsequent method calls. Use `apiUrl` from
-  the session response for those calls.
+- The `direct-url` SOPS snapshot holds the session discovery endpoint, not
+  the API URL for subsequent method calls. The VM helper follows the discovered
+  `apiUrl` internally and restricts bearer delivery to HTTPS Fastmail API hosts.
 - Calendar access is via CalDAV, not the JMAP mail API described here. Fastmail
   MCP is a separate interface with separate tokens and endpoint.
 - A `401` usually means missing, expired, or invalid authorization; do not
