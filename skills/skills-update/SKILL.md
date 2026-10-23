@@ -13,14 +13,22 @@ description: >
 Update installed agent skills to their latest versions using the `npx skills`
 CLI non-interactively.
 
-## Global skill paths (OpenCode)
+## Global skill paths (OpenCode and Shelley)
 
 OpenCode reads global skills from two locations:
 
 - `~/.agents/skills/` — where `npx skills add ... -g` installs by default
 - `~/.config/opencode/skills/` — manually managed or legacy installs
 
-Both are checked by `npx -y skills ls -g --json`.
+On this VM, Shelley also reads `~/.agents/skills/`. A global Skills CLI
+installation targeting OpenCode therefore makes the skill available to both
+OpenCode and Shelley; do not create a second Shelley copy unless verification
+shows the shared path is not being discovered. Confirm that this shared path
+is actually used on the target machine rather than assuming all machines have
+the same Shelley configuration.
+
+The Skills CLI can inventory global installations with
+`npx -y skills ls -g --json`.
 
 ## Workflow
 
@@ -63,9 +71,23 @@ Both are checked by `npx -y skills ls -g --json`.
    npx -y skills add <owner>/<repo> --skill <skill-name> -a opencode -g -y
    ```
 
+6. When the global skill is intended for OpenCode and Shelley, verify both
+   consumers after installation or update:
+
+   ```bash
+   npx -y skills ls -g --json
+   shelley skill ls
+   shelley skill cat <skill-name>
+   ```
+
+   Run the Shelley checks from `/tmp` and the relevant repository root to
+   verify global discovery is independent of the working directory. Confirm
+   the listed skill and loaded `SKILL.md` are the intended installation.
+
 ## Installing this skill
 
-To install `skills-update` itself globally for OpenCode:
+To install `skills-update` itself globally for OpenCode and, on this VM,
+Shelley through their shared `~/.agents/skills/` directory:
 
 ```bash
 npx -y skills add jason-riddle/agent-skills --skill skills-update -a opencode -g -y
