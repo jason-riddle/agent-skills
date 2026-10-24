@@ -45,27 +45,31 @@ installed). Report findings before proposing any cleanup.
 
 ### Nix profiles
 
-Audit profile entries rather than the whole Nix store. This reports each
-profile entry's *closure size*.
+Audit profile entries rather than the whole Nix store. This ranks each direct
+store output by its *closure size* and labels it with the profile entry name.
+Multi-output entries can appear more than once; these are per-output
+attribution figures, not one aggregate size per package.
 
 ```bash
 nix profile list --json \
-  | jq -r '.elements[]? | .storePaths[]?' \
-  | xargs -r nix path-info --json --closure-size \
-  | jq -r 'to_entries
-      | map({path: .key, bytes: .value.closureSize})
-      | sort_by(.bytes) | reverse | .[:15][]
-      | [(.bytes | tostring), .path] | @tsv'
+  | jq -r '.elements | to_entries[] | .key as $name
+      | .value.storePaths[]? | [$name, .] | @tsv' \
+  | while IFS="$(printf '\t')" read -r name path; do
+      nix path-info -S "$path" \
+        | awk -v name="$name" 'NF >= 2 {print $2 "\t" name "\t" $1}'
+    done \
+  | sort -nr -k1,1 \
+  | head -n 15 \
+  | numfmt --field=1 --to=iec-i
 ```
 
-Use `numfmt --field=1 --to=iec-i` on the resulting byte column when available.
 If several Nix profiles matter, run the command for each profile/root rather
 than silently substituting `/nix/store/*`.
 
 **Caveat:** Closure sizes are useful attribution estimates, not reclaimable
-space. Closures share store paths, so adding their sizes double-counts shared
-dependencies. Nix store size, old generations, build results, and caches are
-separate scopes.
+space. Outputs and closures can overlap; multiple outputs of one profile entry
+may appear separately. Do not add the listed sizes together. Nix store size,
+old generations, build results, and caches are separate scopes.
 
 ### Debian/Ubuntu packages (APT/dpkg)
 
@@ -149,10 +153,12 @@ application data.
 
 Include these only when installed and relevant to the user's environment;
 keep every family in its own table and state its scope.
+For optional managers, avoid triggering remote metadata refreshes or downloads;
+if a read-only inventory command attempts them, stop and report the limitation.
 
 | Family | Read-only starting point | Scope warning |
 | --- | --- | --- |
-| Homebrew formulae | `brew list --formula -1`, then `du -sk "$(brew --prefix <formula>)"` per formula | Formula prefixes can share dependencies. Audit casks separately; their app/data locations vary. |
+| Homebrew formulae | `HOMEBREW_NO_AUTO_UPDATE=1 brew list --formula --versions`; measure installed Cellar keg paths, not `opt/` symlinks | Resolve and containment-check keg paths under Homebrew's Cellar. If a command tries to fetch API metadata, stop and report that scope as blocked rather than accepting a download. Casks need a separate app-specific inventory. |
 | `pipx` apps | `pipx environment --value PIPX_HOME`, then `du -sk "$PIPX_HOME/venvs"/*` | Count isolated pipx venvs, not system Python or project virtualenvs. |
 | pnpm/Yarn globals | `pnpm root -g` or `yarn global dir`, then size only that manager-reported global location | Do not combine with npm; their stores/caches and symlink layouts differ. |
 | Snap | `snap list --all` plus sizes under `/var/lib/snapd/snaps` when a retained-revision audit is requested | Snap files can include inactive revisions; report them as managed revision artifacts, not just active apps. |
