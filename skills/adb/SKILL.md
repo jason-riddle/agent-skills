@@ -126,17 +126,12 @@ On the device, open Developer Options → Wireless debugging → "Pair device wi
 pairing code". Keep that dialog open while pairing. It shows a temporary
 pairing code, IP, and a **pairing port** (different from the connection port).
 Treat the code like a short-lived credential: do not put it in notes, scripts,
-or shared logs. Prefer entering it at the interactive prompt; if using the
-optional code argument, avoid shell history and logs that retain command text.
+or shared logs. Enter it at the interactive prompt rather than putting it in
+command arguments.
 
 ```bash
-# On Android 11+, the code may be entered interactively:
+# Enter the short-lived code at the interactive prompt.
 adb pair <ip>:<pairing-port>
-# Enter the code shown in the pairing dialog when prompted.
-
-# Or, where supported, supply it as the second argument (do not copy this
-# placeholder literally):
-adb pair <ip>:<pairing-port> <code>
 
 # Find the connection service/port (usually works on the same local network):
 adb mdns services
@@ -149,14 +144,15 @@ adb connect "$D"
 adb devices -l
 ```
 
-The pairing port and connection port are **different numbers**, and **both
-ports change every time wireless debugging is toggled off/on or the device
-reboots.** Never hardcode either port in scripts or notes — re-read or
-re-scan each session.
+The pairing port and connection port are different, temporary endpoints.
+They can change when Wireless debugging is restarted or the device reboots.
+Never hardcode them in scripts or notes; read the current endpoint from the
+device for each session.
 
 Use the pairing port only for `adb pair`, then use the connection port for
-`adb connect`. After `adb pair` succeeds, the pairing port is closed —
-`adb connect` against it returns `Connection refused`.
+`adb connect`; do not use the pairing endpoint for `adb connect`.
+Pairing establishes trust but does not necessarily create an active transport;
+`adb devices` may remain empty until `adb connect` succeeds.
 
 ### Discovering the connection port
 
@@ -174,6 +170,12 @@ confirm Wireless debugging is enabled and obtain the current connection
 address/port from the device screen or the device owner. If that is not
 available, report the discovery limitation and ask before attempting any
 targeted network probing.
+
+An empty mDNS result does not prove ADB is unreachable. A verified Android 16
+Galaxy Tab A9 connection succeeded by using the device's Tailscale IP with
+the pairing and connection ports read from Wireless debugging. For routed
+paths such as Tailscale, try only those current, device-reported endpoints;
+confirm the network policy permits the required TCP port(s).
 
 ### Disable wireless debugging
 ```bash
@@ -358,11 +360,10 @@ services that can be used for auto-discovery.
 - **Pairing port ≠ connection port.** The port shown in "Pair device with
   pairing code" is only for `adb pair`. After pairing, use the main port
   shown at the top of the Wireless debugging page for `adb connect`.
-  Once pairing succeeds, the pairing port is closed and refuses connections.
 
-- **`adb pair` accepts the pairing code via stdin.** For non-interactive
-  use (scripts, agent automation), pipe the 6-digit code with a here-string:
-  `adb pair <ip>:<port> <<< "158875"`. No interactive prompt appears.
+- **Pairing codes are short-lived credentials.** Prefer the interactive
+  `adb pair` prompt; never put a real code in command arguments, scripts,
+  notes, or retained logs.
 
 - **mDNS discovery may not work across subnets or VPNs (including Tailscale).**
   `adb mdns services` relies on multicast, which commonly does not traverse
@@ -443,10 +444,10 @@ adb reconnect device
 - Try `adb disconnect` then `adb connect <ip>:<port>`.
 - Firewall on the host may block the port — check iptables / ufw.
 - For emulators, the IP is on eth0, not wlan0.
-- **Over Tailscale / cross-subnet:** mDNS discovery won't work. Scan the
-  ephemeral port range (30000-60000) in parallel for the device IP, then
-  `adb connect` each open port to find the real ADB listener. Ask the user
-  to read the port off the device screen only if the scan finds nothing.
+- **Over Tailscale / cross-subnet:** mDNS may return no services because it
+  relies on multicast. Do not scan broad or ephemeral port ranges. Ask for
+  the current connection IP and port shown on the device, then try that exact
+  endpoint and verify with `adb devices -l`.
 
 ### `adb tcpip` succeeds but `adb connect` fails
 - Wait 2-3 seconds after `adb tcpip` for the daemon to start listening.
