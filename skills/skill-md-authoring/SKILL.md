@@ -15,8 +15,9 @@ description: >
 
 A `SKILL.md` file is the entry point of an Agent Skill: YAML frontmatter that
 tells an agent *when* the skill applies, followed by Markdown that tells the
-agent *what to do* once activated. This skill covers only the `SKILL.md` file
-itself — not companion directories like `scripts/`, `references/`, or `assets/`.
+agent *what to do* once activated. Author the entry point together with its
+owning bundle: companion `scripts/`, `references/`, and `assets/` must remain
+portable, correctly linked, and owned alongside it.
 
 ## How a SKILL.md gets used
 
@@ -32,8 +33,9 @@ Two consequences follow:
 
 - The `description` carries the entire triggering burden. If it does not convey
   *when* the skill is useful, the skill never activates.
-- The body competes for context with the conversation and other skills. Keep it
-  lean — under ~500 lines or ~5,000 tokens.
+- The body competes for context with the conversation and other skills. Keep
+  the entry workflow lean; ~500 lines or ~5,000 tokens is a review signal, not
+  a reason to split a coherent procedure or remove safety gates.
 
 ## Required structure
 
@@ -170,11 +172,19 @@ highest-value content in many skills:
 Agents pattern-match well against concrete structures. A short template in
 the body beats a paragraph describing the format.
 
-### Keep it under ~500 lines
+### Disclose detail progressively
 
-If a skill legitimately needs more content, that content belongs in separate
-reference files (outside the scope of this skill). Within a single `SKILL.md`,
-prefer short, focused sections over exhaustive coverage.
+Keep triggers, prerequisites, authorization/privacy gates, stop conditions and
+the main decision path in `SKILL.md`. Do not rely on global instructions being
+inherited. Move long command catalogs, backend-specific examples or uncommon
+troubleshooting into named references only when this reduces routine loading.
+Explain exactly when each reference is needed; require reading it before its
+actions, and keep topic-specific cautions next to those examples too.
+
+Use relative links within the same bundle, not another checkout's private
+files. Validate links, fragments, scripts/assets and modes after a move. Load
+`skills-update` before changing source links or replacing installed bundles;
+never flatten an intentional overlay while reorganizing references.
 
 ## Recommended body skeleton
 
@@ -226,7 +236,10 @@ Before finalizing a `SKILL.md`, verify each item:
 
 **Body**
 - [ ] Written in imperative form, no second person.
-- [ ] Under ~500 lines / ~5,000 tokens.
+- [ ] Entry point is focused; longer catalogs load on demand when useful.
+- [ ] Consent/privacy/stop gates remain explicit in the entry point.
+- [ ] Companion references resolve inside the portable owning bundle.
+- [ ] Existing `allowed-tools`, ownership and local overlays are preserved.
 - [ ] Provides a clear default approach rather than a menu of options.
 - [ ] Includes gotchas / non-obvious facts where applicable.
 - [ ] Teaches a reusable procedure, not a one-off answer.

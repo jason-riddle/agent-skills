@@ -24,8 +24,11 @@ Use explicit non-interactive scope only after the target/effect is approved;
 2. Resolve the exact source repo/ref, skill name, agent, install scope, and
    destination. Inspect symlinks and their canonical targets; do not assume
    lock metadata equals the effective source. Confirm home-path expansion in
-   the actual consumer context. Inventory only as needed, for example
-   `npx -y skills ls -g --json`; do not silently auto-detect mutation scope.
+   the actual consumer context. Start with filesystem/link inspection and
+   `shelley skill ls` where available. Use only an already-installed Skills
+   CLI for additional read-only inventory after checking its help; do not
+   bootstrap/download a CLI merely to inspect or silently auto-detect
+   mutation scope.
 3. Compare the **complete bundle**: relative paths, file bytes, scripts,
    references/assets, executable modes, symlinks and relevant lock changes,
    not only `SKILL.md`. Inspect the source diff and provenance before loading
@@ -35,6 +38,12 @@ Use explicit non-interactive scope only after the target/effect is approved;
    changes, unclear ownership, missing source checkouts, or ambiguous targets.
    Do not reset, stash, truncate, replace, or overwrite local policy. A
    differing local bundle is not obsolete just because a source exists.
+
+Missing helper instructions are a discovery problem, not permission to run
+generators such as `gws generate-skills`. Locate the intended source and
+effective catalog entry; if a required safety/auth helper remains unavailable,
+stop the dependent work and report the missing path. Generate or install a
+bundle only under a separately approved exact destination and ownership plan.
 
 ## Choose the owning update path
 
@@ -76,7 +85,8 @@ skill or a destination when none exists.
 
 Review exact bundle and lock diffs for only approved paths. Verify both
 consumers when global installation is intended for OpenCode and Shelley:
-Skills CLI inventory plus `shelley skill ls` and `shelley skill cat <name>`
+already-installed CLI inventory where applicable, plus `shelley skill ls` and
+`shelley skill cat <name>`
 from `/tmp` and the relevant repository root. Confirm loaded bytes and unique
 names, not just source existence. Recheck status, run repository validation,
 and commit/push only task changes under owner guidance; stop on divergence,
