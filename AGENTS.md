@@ -10,12 +10,13 @@ source bundles under `skills/<name>/`; read its root `AGENTS.md` and
 This checkout and its Git history remain available for provenance and
 reference. Dotfiles-shared skill copies migrated to the consolidated source
 have been removed from this worktree; do not recreate those copies or source
-links here. Other legacy bundles may remain and are not automatically
-migrated or approved for deletion. The public `android-remote-control` bundle
-is a distinct legacy workflow, not the canonical Shelley skill; do not use it
-as a replacement for the consolidated private Shelley bundle. Keep this
-checkout and unrelated content unless separately authorized review says
-otherwise.
+links here. The remaining reviewed copies of migrated bundles have also been
+retired from the current tree. The old public `android-remote-control`
+variant was reviewed and removed; use the consolidated private Shelley bundle
+for that workflow, and do not restore retired paths from Git history.
+
+The `brew` placeholder and unrelated repository content remain. Do not remove
+them or the checkout's Git history without separate authorization.
 
 ## Safety and review
 
